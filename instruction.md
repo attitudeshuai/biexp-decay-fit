@@ -9,7 +9,7 @@
 - 程序骨架已经在了，命令行入口固定：
 
   ```
-  python3 src/decay.py --data 记录JSON路径 --out 报告JSON路径
+  python3 src/decay.py --data 记录JSON路径 --out 报告JSON路径 --cache 缓存JSON路径
   ```
 
 - 记录结构：`instrument.saturation_counts` 是探测器上限；`samples` 每点有 `t`（ns）与 `y`（counts，已含堆积压缩）；`fit` 里有 `saturation_margin`（判定限幅的容差）与 `min_used`（有效点下限）。
@@ -50,6 +50,17 @@
 - `pileup_per_mega` 是堆积系数乘 `1e6`（也就是每百万计数对应的 `k`）。
 - `amplitude_ratio = a1 / a2`；`meta.unit` 照抄输入；数值必须有限，不允许出现 `NaN` 或 `Infinity`。
 
+
+## 复核缓存
+
+同一条曲线在一次演练里会被反复复核，程序要把结果缓存下来，下一次跑同一份记录直接复用：
+
+- 缓存路径由 `--cache` 给出，内容是 UTF-8 的 JSON 对象：`{"version": 1, "entries": [{"key": 记录字节的 sha256, "report": 报告对象}, ...]}`。
+- `key` 取记录文件字节的 sha256，十六进制小写 64 位。
+- 一次运行收尾时：这个 `key` 已在缓存里就原地替换该条目的 `report`；不在就追加到末尾。其他条目一个字节都不要动、顺序不要变。
+- 缓存文件读不出来、不是合法 JSON 或结构不对：当作空缓存，照常算、照常产出报告，最后重写成一份合法缓存。
+- 记录不合法（退出码 2）时缓存文件一个字节都不许动；缓存路径写不进去也按非法记录处理。
+- 报告与缓存都先写临时文件再原子替换，不许留下半截文件。
 
 ## 运行与容错
 

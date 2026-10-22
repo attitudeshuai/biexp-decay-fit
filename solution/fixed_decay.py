@@ -328,6 +328,36 @@ def build_report(scan, res):
     }
 
 
+def load_cache(path):
+    """读复核缓存；读不出来或结构不对就当空缓存。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(raw, dict) or raw.get("version") != 1:
+        return []
+    entries = raw.get("entries")
+    if not isinstance(entries, list):
+        return []
+    out = []
+    for e in entries:
+        if isinstance(e, dict) and isinstance(e.get("key"), str) and isinstance(e.get("report"), dict):
+            out.append({"key": e["key"], "report": e["report"]})
+    return out
+
+
+def record_key(path):
+    import hashlib
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def save_cache(path, entries):
+    """缓存与报告都先写临时文件再原子替换。"""
+    atomic_write(path, {"version": 1, "entries": entries})
+
+
 def atomic_write(path, obj):
     out_dir = os.path.dirname(os.path.abspath(path))
     if out_dir and not os.path.isdir(out_dir):
@@ -350,11 +380,47 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="双指数衰减分解")
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--cache", default=None)
     args = ap.parse_args(argv)
 
-    scan = load_data(args.data)
-    res = analyse(scan)
-    atomic_write(args.out, build_report(scan, res))
+    try:
+        key = record_key(args.data)
+    except OSError:
+        _fail("读不到记录 %s" % args.data)
+
+    entries = load_cache(args.cache) if args.cache else []
+    report = None
+    for e in entries:
+        if e["key"] == key:
+            report = e["report"]
+            break
+
+    if report is None:
+        scan = load_data(args.data)
+        res = analyse(scan)
+        report = build_report(scan, res)
+
+    if args.cache:
+        hit = None
+        for i, e in enumerate(entries):
+            if e["key"] == key:
+                hit = i
+                break
+        entry = {"key": key, "report": report}
+        if hit is None:
+            entries = entries + [entry]
+        else:
+            entries = entries[:]
+            entries[hit] = entry
+        try:
+            save_cache(args.cache, entries)
+        except OSError:
+            _fail("缓存写不进去：%s" % args.cache)
+
+    try:
+        atomic_write(args.out, report)
+    except OSError:
+        _fail("报告写不进去：%s" % args.out)
     return 0
 
 

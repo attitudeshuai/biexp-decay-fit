@@ -177,19 +177,21 @@ def expect(data):
 
 
 # ---------------------------------------------------------------- 驱动被测程序
-def _run(path, out_path, timeout=240):
+def _run(path, out_path, cache_path=None, timeout=240):
     cmd = [sys.executable, ENTRY, "--data", path, "--out", out_path]
+    if cache_path is not None:
+        cmd += ["--cache", cache_path]
     return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                           errors="replace", timeout=timeout)
 
 
-def run_case(data):
+def run_case(data, cache_path=None):
     tmp = tempfile.mkdtemp(prefix="dec-case-")
     dpath = os.path.join(tmp, "decay.json")
     opath = os.path.join(tmp, "report.json")
     with open(dpath, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
-    proc = _run(dpath, opath)
+    proc = _run(dpath, opath, cache_path)
     report = None
     if os.path.exists(opath):
         try:
@@ -444,3 +446,103 @@ def test_failed_run_keeps_previous_report():
     assert second.returncode == 2, "坏记录应退出 2，实际 %r" % second.returncode
     after = open(opath, "rb").read()
     assert after == before, "运行失败把上一次的报告覆盖了"
+
+
+def test_cache_reuse_and_append():
+    """题面原文：「这个 key 已在缓存里就原地替换该条目的 report；不在就追加到末尾」。
+
+    连跑三次：同一份记录跑两次（中间把缓存里那条报告的 tau1_ns 改成哨兵值 999），
+    第二次必须直接复用缓存、报出哨兵值；换一份记录再跑，缓存变成两条、顺序不变。
+    """
+    cache = os.path.join(tempfile.mkdtemp(prefix="dec-cache-"), "cache.json")
+    data_a = make_curve(seed=1301)
+    report_a, ctx_a = run_case(data_a, cache_path=cache)
+    for key in NEED:
+        assert key in report_a, "第一次运行就缺字段 %s" % key
+    assert os.path.exists(cache), "运行结束没有写缓存文件"
+    with open(cache, encoding="utf-8") as f:
+        body = json.load(f)
+    assert isinstance(body, dict) and body.get("version") == 1, "缓存结构不对：%r" % (list(body)[:4],)
+    entries = body.get("entries")
+    assert isinstance(entries, list) and len(entries) == 1, "缓存条目数应为 1，实际 %r" % (entries,)
+    import hashlib
+    key_a = hashlib.sha256(open(ctx_a["data"], "rb").read()).hexdigest()
+    assert entries[0].get("key") == key_a, "缓存 key 不是记录字节的 sha256：%r" % (entries[0].get("key"),)
+    assert isinstance(entries[0].get("report"), dict), "缓存条目里的 report 不是对象"
+
+    entries[0]["report"]["tau1_ns"] = 999.0
+    with open(cache, "w", encoding="utf-8") as f:
+        json.dump(body, f, ensure_ascii=False)
+    report_again, _ = run_case(data_a, cache_path=cache)
+    assert float(report_again.get("tau1_ns", 0.0)) == 999.0, \
+        "第二次跑同一份记录没有复用缓存：tau1_ns=%r" % (report_again.get("tau1_ns"),)
+
+    data_b = make_curve(seed=1409)
+    report_b, ctx_b = run_case(data_b, cache_path=cache)
+    exp_b = expect(data_b)
+    assert abs(float(report_b["tau1_ns"]) - exp_b["tau1"]) <= 0.03 * exp_b["tau1"], \
+        "换记录后没有重新拟合：tau1_ns=%r，独立复算 %r" % (report_b["tau1_ns"], exp_b["tau1"])
+    with open(cache, encoding="utf-8") as f:
+        body2 = json.load(f)
+    keys = [e.get("key") for e in body2.get("entries", [])]
+    assert len(keys) == 2, "缓存条目数应为 2，实际 %r" % (keys,)
+    assert keys[0] == key_a, "原有条目被挪动或覆盖了：%r" % (keys,)
+    key_b = hashlib.sha256(open(ctx_b["data"], "rb").read()).hexdigest()
+    assert keys[1] == key_b, "新条目没有追加到末尾：%r" % (keys,)
+
+
+def test_corrupt_cache_recovered():
+    """题面原文：「缓存文件读不出来、不是合法 JSON 或结构不对：当作空缓存」。
+
+    先塞一段乱码当缓存，再跑一份合格记录：退出码 0、报告正确、缓存被重写成合法结构。
+    """
+    cache = os.path.join(tempfile.mkdtemp(prefix="dec-cache-bad-"), "cache.json")
+    with open(cache, "w", encoding="utf-8") as f:
+        f.write("{ this is not json ][")
+    data = make_curve(seed=1511)
+    report, _ = run_case(data, cache_path=cache)
+    exp = expect(data)
+    assert isinstance(report, dict), "坏缓存把整次运行拖挂了（没有报告）"
+    assert abs(float(report["tau1_ns"]) - exp["tau1"]) <= 0.03 * exp["tau1"], \
+        "坏缓存下报告不对：tau1_ns=%r，独立复算 %r" % (report.get("tau1_ns"), exp["tau1"])
+    with open(cache, encoding="utf-8") as f:
+        body = json.load(f)
+    assert body.get("version") == 1, "坏缓存没有被重写成合法结构：%r" % (body,)
+    assert len(body.get("entries", [])) == 1, "重写后的缓存应只有一条，实际 %r" % (body.get("entries"),)
+
+
+def test_failed_run_leaves_cache_untouched():
+    """题面原文：「记录不合法（退出码 2）时缓存文件一个字节都不许动」。
+
+    先跑一份合格记录把缓存建起来，再用坏记录跑：退出码 2，缓存字节与旧报告都不变；
+    再把缓存路径指成一个目录（写不进去），也要按非法记录退出 2、不产出报告。
+    """
+    cache = os.path.join(tempfile.mkdtemp(prefix="dec-cache-keep-"), "cache.json")
+    good = make_curve(seed=1601)
+    report, ctx = run_case(good, cache_path=cache)
+    assert isinstance(report, dict), "合格记录没有产出报告"
+    before_cache = open(cache, "rb").read()
+    before_report = open(ctx["out"], "rb").read()
+
+    broken = json.loads(json.dumps(good))
+    broken["samples"][7]["t"] = broken["samples"][6]["t"]
+    bad_dir = tempfile.mkdtemp(prefix="dec-cache-broken-")
+    bad_data = os.path.join(bad_dir, "decay.json")
+    bad_out = os.path.join(bad_dir, "report.json")
+    with open(bad_data, "w", encoding="utf-8") as f:
+        json.dump(broken, f, ensure_ascii=False)
+    proc = _run(bad_data, bad_out, cache_path=cache)
+    assert proc.returncode == 2, "坏记录应退出 2，实际 %r" % proc.returncode
+    assert open(cache, "rb").read() == before_cache, "非法记录把缓存改动了"
+    assert open(ctx["out"], "rb").read() == before_report, "非法记录把旧报告改动了"
+    assert not os.path.exists(bad_out), "非法记录不该产出报告"
+
+    unwritable = tempfile.mkdtemp(prefix="dec-cache-dir-")
+    good2 = make_curve(seed=1709)
+    out2 = os.path.join(unwritable, "report.json")
+    data2 = os.path.join(unwritable, "decay.json")
+    with open(data2, "w", encoding="utf-8") as f:
+        json.dump(good2, f, ensure_ascii=False)
+    proc2 = _run(data2, out2, cache_path=unwritable)
+    assert proc2.returncode == 2, "缓存写不进去时应退出 2，实际 %r" % proc2.returncode
+    assert not os.path.exists(out2), "缓存写不进去时不该产出报告"

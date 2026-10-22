@@ -35,7 +35,7 @@ if [ -s "$LOG_DIR/pytest.xml" ] && [ -s "$LOG_DIR/weighted.txt" ]; then
   if [ -z "$COUNT" ]; then
     COUNT=0
   fi
-  if [ "$COUNT" -lt 11 ]; then
+  if [ "$COUNT" -lt 14 ]; then
     SCORE=0
   fi
 fi
