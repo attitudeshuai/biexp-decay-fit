@@ -28,7 +28,13 @@ if [ -s "$LOG_DIR/pytest.xml" ] && [ -s "$LOG_DIR/weighted.txt" ]; then
     ''|*[!0-9.]*) SCORE=0 ;;
     *) SCORE=$RAW ;;
   esac
-  COUNT=$(grep -c '<testcase' "$LOG_DIR/pytest.xml" 2>/dev/null) || COUNT=0
+  COUNT=$(grep -o 'tests="[0-9]*"' "$LOG_DIR/pytest.xml" 2>/dev/null | head -n 1 | tr -cd '0-9')
+  if [ -z "$COUNT" ]; then
+    COUNT=$(grep -o '<testcase' "$LOG_DIR/pytest.xml" 2>/dev/null | wc -l | tr -d ' \r\n')
+  fi
+  if [ -z "$COUNT" ]; then
+    COUNT=0
+  fi
   if [ "$COUNT" -lt 11 ]; then
     SCORE=0
   fi
