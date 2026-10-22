@@ -1,0 +1,16 @@
+# 白名单：只有五项交付物（+ 本文件）进仓库。
+# delivery.toml（登记底稿，含解法思路）与 evidence/（实跑记录，含模型失败分析）一律不进 git。
+# 注意 git 排除规则的顺序：先 `*` 全排，再按「目录 → 目录内容」逐级捞回。
+# 新增顶层文件默认被排除，需要交付时在这里显式加一行。
+*
+!.gitignore
+!task.toml
+!instruction.md
+!environment/
+!environment/**
+!tests/
+!tests/**
+!solution/
+!solution/**
+__pycache__/
+*.pyc
