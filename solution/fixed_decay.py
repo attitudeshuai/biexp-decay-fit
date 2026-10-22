@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""闪烁体衰减曲线复核：双指数分解（两个时间常数 + 基线）。
+"""闪烁体衰减曲线复核：双指数分解（两个时间常数 + 基线 + 堆积系数）。
 
 命令行：
     python3 src/decay.py --data data/decay.json --out out/report.json
 
 口径：
-  · 模型 y(t) = A1·exp(-t/τ1) + A2·exp(-t/τ2) + c，约定 τ1 < τ2；
-  · 探测器上限写在同一份记录的 instrument.saturation_counts 里，读数落在上限附近
-    （差不超过 saturation_margin）的点是被限幅的，必须整点剔除、不参与拟合；
-  · τ1、τ2 先在二维网格上找残差平方和最小，再分别用黄金分割细化；
-    给定两个时间常数时 A1、A2、c 是线性最小二乘（三阶方程闭式解）；
-  · rmse_counts = sqrt(残差平方和 /(n - 4))，用来判断这次拟合是否到噪声量级；
+  · 真实波形 u(t) = A1·exp(-t/τ1) + A2·exp(-t/τ2) + c，约定 τ1 < τ2；
+  · 读出电路有堆积：仪器看到的计数是 y = u/(1 + k·u)，k 是堆积系数（每计数），
+    记录里不给，要和曲线一起估出来；
+  · 探测器上限写在 instrument.saturation_counts 里，读数落在上限附近（差不超过
+    saturation_margin）的点是被限幅的，必须整点剔除、不参与拟合；
+  · 给定 k 时把读数反解成 u = y/(1 - k·y)，此时 A1、A2、c 是线性最小二乘
+    （三阶方程闭式解）；k 先在网格上定位，再与 τ1、τ2 轮流用黄金分割细化；
+  · rmse_counts = sqrt(Σ(实测 - 模型)²/(n - 6))，残差在实测域上算；
   · 输出先写临时文件再原子替换；非法输入以退出码 2 结束且不落文件。
 """
 from __future__ import annotations
@@ -101,6 +103,23 @@ def solve3(a, b):
     return [m[0][3], m[1][3], m[2][3]]
 
 
+def _invert(ys, k):
+    """把堆积后的读数反解回真实计数 u = y/(1 - k·y)。"""
+    out = []
+    for y in ys:
+        d = 1.0 - k * y
+        if d < 0.02:
+            return None
+        out.append(y / d)
+    return out
+
+
+def _model_obs(t, tau1, tau2, a1, a2, base, k):
+    """模型在实测域上的取值：u 先算出来，再走一遍堆积。"""
+    u = a1 * math.exp(-t / tau1) + a2 * math.exp(-t / tau2) + base
+    return u / (1.0 + k * u)
+
+
 def _linear_fit(ts, ys, tau1, tau2):
     """给定两个时间常数，解 A1、A2、c 的最小二乘。"""
     xtx = [[0.0] * 3 for _ in range(3)]
@@ -125,6 +144,90 @@ def _sse(ts, ys, tau1, tau2):
     return acc, coef
 
 
+def _solve(a, b):
+    """通用线性方程组：高斯消元带主元。"""
+    n = len(a)
+    m = [a[i][:] + [b[i]] for i in range(n)]
+    for col in range(n):
+        piv = max(range(col, n), key=lambda r: abs(m[r][col]))
+        if abs(m[piv][col]) < 1e-18:
+            return None
+        m[col], m[piv] = m[piv], m[col]
+        pv = m[col][col]
+        for k in range(col, n + 1):
+            m[col][k] /= pv
+        for r in range(n):
+            if r != col:
+                f = m[r][col]
+                for k in range(col, n + 1):
+                    m[r][k] -= f * m[col][k]
+    return [m[i][n] for i in range(n)]
+
+
+def _sse_params(ts, ys, p):
+    t1, t2, a1, a2, c, k = p
+    if t1 <= 0 or t2 <= t1 or k < 0:
+        return None
+    acc = 0.0
+    for t, y in zip(ts, ys):
+        u = a1 * math.exp(-t / t1) + a2 * math.exp(-t / t2) + c
+        m = u / (1.0 + k * u)
+        acc += (y - m) ** 2
+    return acc
+
+
+def _refine(ts, ys, p, iters=120):
+    """实测域残差上的 Levenberg-Marquardt 精修，六个参数一起动。"""
+    p = list(p)
+    sse = _sse_params(ts, ys, p)
+    if sse is None:
+        return None
+    lam = 1e-3
+    for _ in range(iters):
+        t1, t2, a1, a2, c, k = p
+        jtj = [[0.0] * 6 for _ in range(6)]
+        jtr = [0.0] * 6
+        for t, y in zip(ts, ys):
+            e1 = math.exp(-t / t1)
+            e2 = math.exp(-t / t2)
+            u = a1 * e1 + a2 * e2 + c
+            w = 1.0 / (1.0 + k * u)
+            w2 = w * w
+            m = u * w
+            # dy/d参数
+            jac = [w2 * a1 * e1 * t / (t1 * t1),
+                   w2 * a2 * e2 * t / (t2 * t2),
+                   w2 * e1, w2 * e2, w2, -u * u * w2]
+            r = y - m
+            for i in range(6):
+                jtr[i] += jac[i] * r
+                for j in range(6):
+                    jtj[i][j] += jac[i] * jac[j]
+        ok = False
+        while lam < 1e8:
+            aug = [row[:] for row in jtj]
+            for i in range(6):
+                aug[i][i] *= (1.0 + lam)
+                aug[i][i] += 1e-12
+            step = _solve(aug, jtr)
+            if step is None:
+                lam *= 10.0
+                continue
+            trial = [p[i] + step[i] for i in range(6)]
+            trial[5] = max(0.0, trial[5])
+            new = _sse_params(ts, ys, trial)
+            if new is not None and new < sse:
+                p = trial
+                sse = new
+                lam = max(lam / 3.0, 1e-10)
+                ok = True
+                break
+            lam *= 4.0
+        if not ok:
+            break
+    return p, sse
+
+
 def _golden(fn, lo, hi, iters=60):
     phi = (math.sqrt(5.0) - 1.0) / 2.0
     a, b = lo, hi
@@ -145,30 +248,47 @@ def _golden(fn, lo, hi, iters=60):
     return (a + b) / 2.0
 
 
+K_GRID = (0.0, 1.5e-5, 3.0e-5, 5.0e-5, 8.0e-5, 1.3e-4, 2.0e-4)
+
+
 def fit_biexp(ts, ys):
     t_min = min(ts)
     t_max = max(ts)
     span = max(t_max - t_min, 1e-9)
     t1_lo, t1_hi = span / 500.0, span / 5.0
+    # 第一步：在（τ1、τ2、k）三维网格上粗定位，系数用反解后的线性最小二乘
     best = None
-    for i in range(41):
-        tau1 = t1_lo * (t1_hi / t1_lo) ** (i / 40.0)
-        for j in range(41):
-            tau2 = tau1 * 1.2 * (200.0 ** (j / 40.0))
-            if tau2 <= tau1:
-                continue
-            sse, coef = _sse(ts, ys, tau1, tau2)
-            if sse is not None and (best is None or sse < best[0]):
-                best = (sse, tau1, tau2)
-    tau1, tau2 = best[1], best[2]
-    for _ in range(8):
-        tau1 = _golden(lambda x: _sse(ts, ys, x, tau2)[0],
-                       max(t1_lo, tau1 / 1.6), min(tau2 / 1.05, tau1 * 1.6))
-        tau2 = _golden(lambda x: _sse(ts, ys, tau1, x)[0],
-                       max(tau1 * 1.05, tau2 / 1.6), min(tau1 * 200.0, tau2 * 1.6))
-    sse, coef = _sse(ts, ys, tau1, tau2)
-    return {"tau1": tau1, "tau2": tau2, "a1": coef[0], "a2": coef[1],
-            "base": coef[2], "sse": sse}
+    for k in K_GRID:
+        yy = _invert(ys, k)
+        if yy is None:
+            continue
+        for i in range(17):
+            tau1 = t1_lo * (t1_hi / t1_lo) ** (i / 16.0)
+            for j in range(17):
+                tau2 = tau1 * 1.2 * (200.0 ** (j / 16.0))
+                if tau2 <= tau1:
+                    continue
+                _, coef = _sse(ts, yy, tau1, tau2)
+                if coef is None:
+                    continue
+                cand = [tau1, tau2, coef[0], coef[1], coef[2], k]
+                val = _sse_params(ts, ys, cand)
+                if val is not None and (best is None or val < best[0]):
+                    best = (val, cand)
+    if best is None:
+        return None
+    # 第二步：实测域残差上的 LM 精修
+    out = _refine(ts, ys, best[1])
+    if out is None:
+        p, sse = best[1], best[0]
+    else:
+        p, sse = out
+    tau1, tau2, a1, a2, c, k = p
+    if tau1 >= tau2:
+        tau1, tau2, a1, a2 = tau2, tau1, a2, a1
+    return {"tau1": tau1, "tau2": tau2, "a1": a1, "a2": a2,
+            "base": c, "pileup": k, "sse": sse}
+
 
 
 def analyse(scan):
@@ -178,7 +298,9 @@ def analyse(scan):
     ts = [scan["times"][i] for i in idx]
     ys = [scan["ys"][i] for i in idx]
     fit = fit_biexp(ts, ys)
-    dof = len(ts) - 4
+    if fit is None:
+        _fail("拟合失败，数据不足以定出参数")
+    dof = len(ts) - 6
     if dof <= 0:
         _fail("有效点太少，自由度不够")
     fit["rmse"] = math.sqrt(fit["sse"] / dof)
@@ -199,6 +321,7 @@ def build_report(scan, res):
         "a1_counts": round(res["a1"], 2),
         "a2_counts": round(res["a2"], 2),
         "baseline_counts": round(res["base"], 2),
+        "pileup_per_mega": round(res["pileup"] * 1e6, 2),
         "amplitude_ratio": round(ratio, 3),
         "rmse_counts": round(res["rmse"], 3),
         "meta": {"model": "biexp", "unit": scan["unit"]},

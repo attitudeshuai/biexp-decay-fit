@@ -1,10 +1,8 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""判分输出：10 条行为测试，按重要程度加权，权重和 = 1。
+"""闪烁体衰减曲线复核的验收测试。
 
-每条测试自己造一段双指数衰减曲线，按两个时间常数的二维搜索独立复算
-（自己的网格与细化路径），再驱动被测程序的命令行入口比对报告。
-期望值不读被测代码，也不读参考解的输出。
+每条测试都自己造曲线、跑被测程序、再独立复算一遍期望值，断言全写在本函数内。
+权重表放在 tests/conftest.py，score 只按权重汇总。
 """
 import json
 import math
@@ -16,19 +14,6 @@ import tempfile
 APP = os.environ.get("CT_APP_DIR", "/app")
 ENTRY = os.path.join(APP, "src", "decay.py")
 
-WEIGHTS = {
-    "test_tau_pair_matches_independent_fit": 0.15,
-    "test_near_degenerate_components_resolved": 0.14,
-    "test_saturated_points_removed": 0.11,
-    "test_second_curve_with_other_rates": 0.11,
-    "test_rmse_near_noise_level": 0.07,
-    "test_baseline_and_ratio_consistent": 0.07,
-    "test_invalid_data_rejected_without_output": 0.11,
-    "test_report_schema_and_rounding": 0.08,
-    "test_rerun_produces_identical_bytes": 0.08,
-    "test_failed_run_keeps_previous_report": 0.08,
-}
-
 
 class _Lcg(object):
     def __init__(self, seed):
@@ -39,15 +24,18 @@ class _Lcg(object):
         return (self.state % 1000003) / 1000003.0
 
 
-def make_curve(a1=8200.0, tau1=3.5, a2=1500.0, tau2=18.0, base=12.0,
-               dt_ns=0.5, duration_ns=120.0, sigma=3.0, saturation=6000.0, seed=101):
+def make_curve(a1=12000.0, tau1=3.5, a2=2100.0, tau2=18.0, base=12.0,
+               dt_ns=0.5, duration_ns=120.0, sigma=3.0, saturation=6000.0,
+               pileup=5.0e-5, seed=101):
+    """造一条带堆积与限幅的双指数曲线。"""
     rng = _Lcg(seed)
     n = int(round(duration_ns / dt_ns)) + 1
     samples = []
     for i in range(n):
         t = round(i * dt_ns, 2)
-        y = a1 * math.exp(-t / tau1) + a2 * math.exp(-t / tau2) + base
-        y += (rng.next_u() + rng.next_u() - 1.0) * math.sqrt(6.0) * sigma
+        u = a1 * math.exp(-t / tau1) + a2 * math.exp(-t / tau2) + base
+        u += (rng.next_u() + rng.next_u() - 1.0) * math.sqrt(6.0) * sigma
+        y = u / (1.0 + pileup * u)
         if y > saturation:
             y = saturation
         samples.append({"t": t, "y": round(y, 3)})
@@ -58,22 +46,23 @@ def make_curve(a1=8200.0, tau1=3.5, a2=1500.0, tau2=18.0, base=12.0,
 
 
 # ---------------------------------------------------------------- 独立复算
-def _solve3(a, b):
-    m = [row[:] + [b[i]] for i, row in enumerate(a)]
-    for col in range(3):
-        piv = max(range(col, 3), key=lambda r: abs(m[r][col]))
-        if abs(m[piv][col]) < 1e-14:
+def _solve(a, b):
+    n = len(a)
+    m = [a[i][:] + [b[i]] for i in range(n)]
+    for col in range(n):
+        piv = max(range(col, n), key=lambda r: abs(m[r][col]))
+        if abs(m[piv][col]) < 1e-18:
             return None
         m[col], m[piv] = m[piv], m[col]
         pv = m[col][col]
-        for k in range(col, 4):
+        for k in range(col, n + 1):
             m[col][k] /= pv
-        for r in range(3):
+        for r in range(n):
             if r != col:
                 f = m[r][col]
-                for k in range(col, 4):
+                for k in range(col, n + 1):
                     m[r][k] -= f * m[col][k]
-    return [m[0][3], m[1][3], m[2][3]]
+    return [m[i][n] for i in range(n)]
 
 
 def _fit_lin(ts, ys, t1, t2):
@@ -85,40 +74,71 @@ def _fit_lin(ts, ys, t1, t2):
             xty[i] += x[i] * y
             for j in range(3):
                 xtx[i][j] += x[i] * x[j]
-    return _solve3(xtx, xty)
+    return _solve(xtx, xty)
 
 
-def _sse(ts, ys, t1, t2):
-    c = _fit_lin(ts, ys, t1, t2)
-    if c is None:
-        return None, None
+def _sse_params(ts, ys, p):
+    t1, t2, a1, a2, c, k = p
+    if t1 <= 0 or t2 <= t1 or k < 0:
+        return None
     acc = 0.0
     for t, y in zip(ts, ys):
-        acc += (y - (c[0] * math.exp(-t / t1) + c[1] * math.exp(-t / t2) + c[2])) ** 2
-    return acc, c
+        u = a1 * math.exp(-t / t1) + a2 * math.exp(-t / t2) + c
+        acc += (y - u / (1.0 + k * u)) ** 2
+    return acc
 
 
-def _golden(fn, lo, hi, iters=60):
-    phi = (math.sqrt(5.0) - 1.0) / 2.0
-    a, b = lo, hi
-    c = b - phi * (b - a)
-    d = a + phi * (b - a)
-    fc, fd = fn(c), fn(d)
+def _lm(ts, ys, p, iters=90):
+    """实测读数上的 Levenberg-Marquardt（本轮不用矩阵库，自己解正规方程）。"""
+    p = list(p)
+    sse = _sse_params(ts, ys, p)
+    if sse is None:
+        return None, None
+    lam = 1e-2
     for _ in range(iters):
-        if fc is None or fd is None:
+        t1, t2, a1, a2, c, k = p
+        jtj = [[0.0] * 6 for _ in range(6)]
+        jtr = [0.0] * 6
+        for t, y in zip(ts, ys):
+            e1 = math.exp(-t / t1)
+            e2 = math.exp(-t / t2)
+            u = a1 * e1 + a2 * e2 + c
+            w = 1.0 / (1.0 + k * u)
+            w2 = w * w
+            jac = [w2 * a1 * e1 * t / (t1 * t1),
+                   w2 * a2 * e2 * t / (t2 * t2),
+                   w2 * e1, w2 * e2, w2, -u * u * w2]
+            r = y - u * w
+            for i in range(6):
+                jtr[i] += jac[i] * r
+                for j in range(6):
+                    jtj[i][j] += jac[i] * jac[j]
+        moved = False
+        while lam < 1e8:
+            aug = [row[:] for row in jtj]
+            for i in range(6):
+                aug[i][i] *= (1.0 + lam)
+                aug[i][i] += 1e-12
+            step = _solve(aug, jtr)
+            if step is None:
+                lam *= 10.0
+                continue
+            trial = [p[i] + step[i] for i in range(6)]
+            trial[5] = max(0.0, trial[5])
+            new = _sse_params(ts, ys, trial)
+            if new is not None and new < sse:
+                p, sse = trial, new
+                lam = max(lam / 3.0, 1e-10)
+                moved = True
+                break
+            lam *= 4.0
+        if not moved:
             break
-        if fc <= fd:
-            b, d, fd = d, c, fc
-            c = b - phi * (b - a)
-            fc = fn(c)
-        else:
-            a, c, fc = c, d, fd
-            d = a + phi * (b - a)
-            fd = fn(d)
-    return (a + b) / 2.0
+    return p, sse
 
 
 def expect(data):
+    """独立复算：剔限幅点，粗网格定位后精修，返回期望的六个参数与 rmse。"""
     sat = float(data["instrument"]["saturation_counts"])
     margin = float(data["fit"]["saturation_margin"])
     ts, ys = [], []
@@ -130,21 +150,30 @@ def expect(data):
     span = max(ts) - min(ts)
     lo, hi = span / 500.0, span / 5.0
     best = None
-    for i in range(31):
-        t1 = lo * (hi / lo) ** (i / 30.0)
-        for j in range(31):
-            t2 = t1 * 1.2 * (200.0 ** (j / 30.0))
-            sse, coef = _sse(ts, ys, t1, t2)
-            if sse is not None and (best is None or sse < best[0]):
-                best = (sse, t1, t2)
-    t1, t2 = best[1], best[2]
-    for _ in range(6):
-        t1 = _golden(lambda x: _sse(ts, ys, x, t2)[0], max(lo, t1 / 1.5), min(t2 / 1.05, t1 * 1.5))
-        t2 = _golden(lambda x: _sse(ts, ys, t1, x)[0], max(t1 * 1.05, t2 / 1.5), min(t1 * 200.0, t2 * 1.5))
-    sse, coef = _sse(ts, ys, t1, t2)
-    dof = len(ts) - 4
-    return {"tau1": t1, "tau2": t2, "a1": coef[0], "a2": coef[1], "base": coef[2],
-            "rmse": math.sqrt(sse / dof), "n_used": len(ts), "dof": dof, "sse": sse}
+    for k in (0.0, 1.2e-5, 3.5e-5, 6.5e-5, 1.1e-4):
+        d = 1.0 - k * max(ys)
+        if d < 0.05:
+            continue
+        for i in range(13):
+            t1 = lo * (hi / lo) ** (i / 12.0)
+            for j in range(13):
+                t2 = t1 * 1.2 * (200.0 ** (j / 12.0))
+                if t2 <= t1:
+                    continue
+                coef = _fit_lin(ts, [y / (1.0 - k * y) for y in ys], t1, t2)
+                if coef is None:
+                    continue
+                cand = [t1, t2, coef[0], coef[1], coef[2], k]
+                val = _sse_params(ts, ys, cand)
+                if val is not None and (best is None or val < best[0]):
+                    best = (val, cand)
+    p, sse = _lm(ts, ys, best[1])
+    if p is None:
+        p, sse = best[1], best[0]
+    t1, t2, a1, a2, c, k = p
+    dof = len(ts) - 6
+    return {"tau1": t1, "tau2": t2, "a1": a1, "a2": a2, "base": c, "pileup": k,
+            "rmse": math.sqrt(sse / dof), "n_used": len(ts), "dof": dof}
 
 
 # ---------------------------------------------------------------- 驱动被测程序
@@ -171,193 +200,225 @@ def run_case(data):
     return report, {"data": dpath, "out": opath, "proc": proc, "dir": tmp}
 
 
-def _complete(report):
-    need = {"n_total", "n_used", "dof", "tau1_ns", "tau2_ns", "a1_counts",
-            "a2_counts", "baseline_counts", "amplitude_ratio", "rmse_counts"}
-    if not isinstance(report, dict) or not need.issubset(set(report)):
-        return False
-    for key in ("tau1_ns", "tau2_ns", "a1_counts", "a2_counts", "baseline_counts", "rmse_counts"):
-        try:
-            if not math.isfinite(float(report[key])):
-                return False
-        except (KeyError, TypeError, ValueError):
-            return False
-    return True
+NEED = {"n_total", "n_used", "dof", "tau1_ns", "tau2_ns", "a1_counts",
+        "a2_counts", "baseline_counts", "pileup_per_mega", "amplitude_ratio",
+        "rmse_counts"}
 
 
-def _close(got, want, rel, floor=0.0):
+def _num(report, key):
+    assert isinstance(report, dict), "报告不存在或不是 JSON 对象"
+    assert key in report, "报告缺少字段 %s" % key
     try:
-        v = float(got)
+        v = float(report[key])
     except (TypeError, ValueError):
-        return False
-    if not math.isfinite(v):
-        return False
-    return abs(v - want) <= max(rel * abs(want), floor)
+        raise AssertionError("字段 %s 不是数值：%r" % (key, report[key]))
+    assert math.isfinite(v), "字段 %s 不是有限数值：%r" % (key, v)
+    return v
 
 
 # ---------------------------------------------------------------- 测试
 def test_tau_pair_matches_independent_fit():
-    """题面原文：「按双指数模型拟合两个时间常数、两个幅度与基线，约定 τ1 < τ2」。
+    """题面原文：「真实波形 u(t) = A1·exp(-t/τ1) + A2·exp(-t/τ2) + c」与「以实测读数与模型的残差平方和为准」。
 
-    出厂曲线（τ1≈3.5 ns、τ2≈18 ns）：两个时间常数与独立复算相差不超过 1.5%，幅度不超过 2%。
+    出厂曲线（τ1≈3.5 ns、τ2≈18 ns、k≈5e-5）：两个时间常数与独立复算相差不超过 2%，
+    幅度不超过 5%。
     """
     data = make_curve(seed=101)
     report, _ = run_case(data)
-    if not _complete(report):
-        return False
+    for key in NEED:
+        assert key in report, "报告缺少字段 %s" % key
     exp = expect(data)
-    return (_close(report["tau1_ns"], exp["tau1"], 0.015)
-            and _close(report["tau2_ns"], exp["tau2"], 0.015)
-            and _close(report["a1_counts"], exp["a1"], 0.02)
-            and _close(report["a2_counts"], exp["a2"], 0.02))
+    tau1 = _num(report, "tau1_ns")
+    tau2 = _num(report, "tau2_ns")
+    a1 = _num(report, "a1_counts")
+    a2 = _num(report, "a2_counts")
+    assert abs(tau1 - exp["tau1"]) <= 0.02 * exp["tau1"], \
+        "tau1 差得太多：被测 %r，独立复算 %r" % (tau1, exp["tau1"])
+    assert abs(tau2 - exp["tau2"]) <= 0.02 * exp["tau2"], \
+        "tau2 差得太多：被测 %r，独立复算 %r" % (tau2, exp["tau2"])
+    assert abs(a1 - exp["a1"]) <= 0.05 * abs(exp["a1"]), \
+        "a1 差得太多：被测 %r，独立复算 %r" % (a1, exp["a1"])
+    assert abs(a2 - exp["a2"]) <= 0.05 * abs(exp["a2"]), \
+        "a2 差得太多：被测 %r，独立复算 %r" % (a2, exp["a2"])
+
+
+def test_pileup_coefficient_recovered():
+    """题面原文：「仪器读到的是 y = u / (1 + k·u)……记录里不写 k，要拿曲线本身估出来」。
+
+    真实 k=5e-5（换算成 pileup_per_mega 是 50）与 k=1.2e-4（120）两条曲线各跑一次：
+    报告值与独立复算相差不超过 10%，且不能把 k 当 0 处理（拿 k=0 拟合会偏出 25%以上）。
+    """
+    for true_k, seed in ((5.0e-5, 1103), (1.2e-4, 1207)):
+        data = make_curve(pileup=true_k, seed=seed)
+        report, _ = run_case(data)
+        exp = expect(data)
+        got = _num(report, "pileup_per_mega")
+        want = exp["pileup"] * 1e6
+        assert abs(got - want) <= 0.10 * abs(want), \
+            "堆积系数差得太多：被测 %r，独立复算 %r" % (got, want)
+        assert abs(got - true_k * 1e6) <= 0.25 * true_k * 1e6, \
+            "报告值离真实堆积系数太远：被测 %r，真实 %r" % (got, true_k * 1e6)
 
 
 def test_near_degenerate_components_resolved():
-    """题面原文：「两个时间常数拉不开时也要分开，不能退化成一个指数」。
+    """题面原文：「两个时间常数拉不开时也要分开，不能退化成一个指数」对应的近简并情形。
 
-    τ1=4 ns、τ2=11 ns 的曲线（比值约 2.7，比出厂曲线近得多）：两个时间常数相差不超过 4%，
-    幅度相差不超过 8%。单指数拟合在这里会整体跑偏。
+    τ1=4 ns、τ2=11 ns 的曲线（比值约 2.7，比出厂曲线近得多）：两个时间常数相差不超过 5%，
+    幅度相差不超过 10%。单指数拟合在这里会整体跑偏。
     """
-    data = make_curve(tau1=4.0, tau2=11.0, a1=5000.0, a2=2200.0, sigma=4.0, seed=211)
+    data = make_curve(tau1=4.0, tau2=11.0, a1=8000.0, a2=3200.0, sigma=4.0,
+                      saturation=9000.0, pileup=6.0e-5, seed=211)
     report, _ = run_case(data)
-    if not _complete(report):
-        return False
     exp = expect(data)
-    return (_close(report["tau1_ns"], exp["tau1"], 0.04)
-            and _close(report["tau2_ns"], exp["tau2"], 0.04)
-            and _close(report["a1_counts"], exp["a1"], 0.08)
-            and _close(report["a2_counts"], exp["a2"], 0.08))
+    tau1 = _num(report, "tau1_ns")
+    tau2 = _num(report, "tau2_ns")
+    assert abs(tau1 - exp["tau1"]) <= 0.05 * exp["tau1"], \
+        "近简并曲线 tau1 偏了：被测 %r，独立复算 %r" % (tau1, exp["tau1"])
+    assert abs(tau2 - exp["tau2"]) <= 0.05 * exp["tau2"], \
+        "近简并曲线 tau2 偏了：被测 %r，独立复算 %r" % (tau2, exp["tau2"])
+    assert tau2 > 1.8 * tau1, "两个成分退化到一起了：tau1=%r tau2=%r" % (tau1, tau2)
 
 
 def test_saturated_points_removed():
-    """题面原文：「读数落在探测器上限附近的点是被限幅的，必须整点剔除」。
+    """题面原文：「读数落在探测器上限附近……的点是被限幅的，整点剔除、不参与拟合」。
 
-    出厂曲线前段有 4 个点顶在上限：n_used 必须只算未饱和点，参数不受影响。
+    出厂曲线前段有 5 个点顶在上限：n_used 必须只算未饱和点，参数不受影响；
+    把限幅点算进去会让 tau1 偏掉 5% 以上。
     """
     data = make_curve(seed=307)
-    report, _ = run_case(data)
-    if not _complete(report):
-        return False
     exp = expect(data)
-    return (report.get("n_used") == exp["n_used"]
-            and report.get("n_total") == len(data["samples"])
-            and _close(report["tau1_ns"], exp["tau1"], 0.015))
+    report, _ = run_case(data)
+    n_used = int(_num(report, "n_used"))
+    n_total = int(_num(report, "n_total"))
+    assert n_total == len(data["samples"]), \
+        "n_total 应为采样点总数 %d，实际 %d" % (len(data["samples"]), n_total)
+    assert n_used == exp["n_used"], \
+        "n_used 应为剔除限幅点后的 %d，实际 %d" % (exp["n_used"], n_used)
+    tau1 = _num(report, "tau1_ns")
+    assert abs(tau1 - exp["tau1"]) <= 0.02 * exp["tau1"], \
+        "剔除限幅点后 tau1 仍偏：被测 %r，独立复算 %r" % (tau1, exp["tau1"])
 
 
 def test_second_curve_with_other_rates():
-    """题面原文：「复检会喂别的样品曲线，时间常数与幅度都不同」。
+    """题面原文：「复检会喂别的样品曲线，时间常数、幅度比、堆积系数与噪声水平都不同」。
 
-    换 τ1=1.2 ns、τ2=45 ns、幅度 12000/900 的曲线后仍要吻合。
+    换 τ1=1.2 ns、τ2=45 ns、幅度 12000/900、k=8e-5 的曲线后仍要吻合（时间常数 2.5%）。
     """
     data = make_curve(a1=12000.0, tau1=1.2, a2=900.0, tau2=45.0, base=8.0,
-                      saturation=9000.0, sigma=5.0, duration_ns=200.0, seed=409)
+                      saturation=9000.0, sigma=5.0, duration_ns=200.0,
+                      pileup=8.0e-5, seed=409)
     report, _ = run_case(data)
-    if not _complete(report):
-        return False
     exp = expect(data)
-    return (_close(report["tau1_ns"], exp["tau1"], 0.02)
-            and _close(report["tau2_ns"], exp["tau2"], 0.02))
+    tau1 = _num(report, "tau1_ns")
+    tau2 = _num(report, "tau2_ns")
+    assert abs(tau1 - exp["tau1"]) <= 0.025 * exp["tau1"], \
+        "换曲线后 tau1 偏了：被测 %r，独立复算 %r" % (tau1, exp["tau1"])
+    assert abs(tau2 - exp["tau2"]) <= 0.025 * exp["tau2"], \
+        "换曲线后 tau2 偏了：被测 %r，独立复算 %r" % (tau2, exp["tau2"])
 
 
 def test_rmse_near_noise_level():
-    """题面原文：「报告给出拟合残差，用来判断这次拟合是否到噪声量级」。
+    """题面原文：「报告给出 rmse = sqrt(残差平方和 /(n - 6))，残差在实测读数上算」。
 
     噪声 σ=3 counts：rmse 落在 2 到 5 之间，且与独立复算相差不超过 20%。
     """
     data = make_curve(seed=503)
     report, _ = run_case(data)
-    if not _complete(report):
-        return False
     exp = expect(data)
-    return 2.0 <= float(report["rmse_counts"]) <= 5.0 and _close(report["rmse_counts"], exp["rmse"], 0.20)
+    rmse = _num(report, "rmse_counts")
+    assert 2.0 <= rmse <= 5.0, "rmse 不在噪声量级：%r" % rmse
+    assert abs(rmse - exp["rmse"]) <= 0.20 * exp["rmse"], \
+        "rmse 与独立复算差得太多：被测 %r，独立复算 %r" % (rmse, exp["rmse"])
 
 
 def test_baseline_and_ratio_consistent():
-    """题面原文：「给出基线计数与两个幅度的比值，比值要等于 a1/a2」。
+    """题面原文：「amplitude_ratio = a1 / a2」，基线是本底计数。
 
-    基线在 12 counts 附近（±3），amplitude_ratio 与 a1/a2 一致（0.5%）。
+    基线在 8 到 16 counts 之间（真值 12），amplitude_ratio 与 a1/a2 一致（0.5%）。
     """
     data = make_curve(seed=601)
     report, _ = run_case(data)
-    if not _complete(report):
-        return False
-    try:
-        a1 = float(report["a1_counts"]); a2 = float(report["a2_counts"])
-        base = float(report["baseline_counts"]); ratio = float(report["amplitude_ratio"])
-    except (KeyError, TypeError, ValueError):
-        return False
-    if not (8.0 <= base <= 16.0):
-        return False
-    return abs(ratio - a1 / a2) <= 0.005 * abs(a1 / a2)
+    base = _num(report, "baseline_counts")
+    a1 = _num(report, "a1_counts")
+    a2 = _num(report, "a2_counts")
+    ratio = _num(report, "amplitude_ratio")
+    assert 8.0 <= base <= 16.0, "基线不在 12 附近：%r" % base
+    want = a1 / a2
+    assert abs(ratio - want) <= 0.005 * abs(want), \
+        "amplitude_ratio 与 a1/a2 不一致：%r 对 %r" % (ratio, want)
 
 
 def test_invalid_data_rejected_without_output():
-    """题面原文：「记录不合法时以退出码 2 结束，不产出报告」。
+    """题面原文：「记录不合法时以退出码 2 结束、往 stderr 写原因、不产出报告」。
 
-    四种坏记录：采样点不足 100、时间不单调、饱和上限非正、有效点不足。
+    四种坏记录：采样点不足 100、时间不单调、探测器上限非正、有效点不足。
+    每种都要退出码 2、stderr 有原因、目录里不留报告也不留临时文件。
     """
     good = make_curve(seed=701)
+    cases = []
     few = json.loads(json.dumps(good))
     few["samples"] = few["samples"][:60]
+    cases.append(("采样点不足", few))
     nonmono = json.loads(json.dumps(good))
     nonmono["samples"][10]["t"] = nonmono["samples"][9]["t"]
+    cases.append(("时间不单调", nonmono))
     badsat = json.loads(json.dumps(good))
     badsat["instrument"]["saturation_counts"] = 0
+    cases.append(("上限非正", badsat))
     short = json.loads(json.dumps(good))
     short["fit"]["min_used"] = 300
-    for data in (few, nonmono, badsat, short):
+    cases.append(("有效点不足", short))
+    for label, data in cases:
         tmp = tempfile.mkdtemp(prefix="dec-bad-")
         dpath = os.path.join(tmp, "decay.json")
         opath = os.path.join(tmp, "report.json")
         with open(dpath, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
         proc = _run(dpath, opath)
-        if proc.returncode != 2 or os.path.exists(opath) or not (proc.stderr or "").strip():
-            return False
-        if [n for n in os.listdir(tmp) if n.endswith(".tmp")]:
-            return False
-    return True
+        assert proc.returncode == 2, "%s：退出码应为 2，实际 %r" % (label, proc.returncode)
+        assert (proc.stderr or "").strip(), "%s：stderr 没有写原因" % label
+        assert not os.path.exists(opath), "%s：不该产出报告文件" % label
+        leftovers = [n for n in os.listdir(tmp) if n not in ("decay.json",)]
+        assert not leftovers, "%s：目录里留下残留文件 %r" % (label, leftovers)
 
 
 def test_report_schema_and_rounding():
-    """题面原文：「报告结构固定，时间常数三位小数、幅度与基线两位、比值与残差三位」。
+    """题面原文：「tau1_ns / tau2_ns / amplitude_ratio / rmse_counts 保留三位小数；a1_counts / a2_counts / baseline_counts / pileup_per_mega 保留两位」。
 
-    校验顶层字段、位数与有限性，文件里不出现 NaN 或 Infinity。
+    校验顶层字段、位数、dof 与 tau1 < tau2，文件里不出现 NaN 或 Infinity。
     """
     data = make_curve(seed=809)
     report, ctx = run_case(data)
-    if not _complete(report):
-        return False
+    for key in NEED:
+        assert key in report, "报告缺少字段 %s" % key
     for key in ("tau1_ns", "tau2_ns", "amplitude_ratio", "rmse_counts"):
-        v = float(report[key])
-        if abs(v - round(v, 3)) > 1e-12:
-            return False
-    for key in ("a1_counts", "a2_counts", "baseline_counts"):
-        v = float(report[key])
-        if abs(v - round(v, 2)) > 1e-12:
-            return False
-    if report.get("dof") != report.get("n_used") - 4:
-        return False
-    if float(report["tau1_ns"]) >= float(report["tau2_ns"]):
-        return False
+        v = _num(report, key)
+        assert abs(v - round(v, 3)) <= 1e-12, "字段 %s 不是三位小数：%r" % (key, v)
+    for key in ("a1_counts", "a2_counts", "baseline_counts", "pileup_per_mega"):
+        v = _num(report, key)
+        assert abs(v - round(v, 2)) <= 1e-12, "字段 %s 不是两位小数：%r" % (key, v)
+    n_used = int(_num(report, "n_used"))
+    assert int(_num(report, "dof")) == n_used - 6, \
+        "dof 应等于 n_used - 6：n_used=%r dof=%r" % (n_used, report["dof"])
+    assert _num(report, "tau1_ns") < _num(report, "tau2_ns"), "tau1 必须小于 tau2"
     raw = open(ctx["out"], encoding="utf-8").read()
-    return "NaN" not in raw and "Infinity" not in raw
+    assert "NaN" not in raw and "Infinity" not in raw, "报告里出现了 NaN 或 Infinity"
 
 
 def test_rerun_produces_identical_bytes():
-    """题面原文：「同一份记录重复运行，报告逐字节一致」。
+    """题面原文：「同一份记录重复运行，报告逐字节一致（不要写时间戳之类的运行期信息）」。
 
-    连跑两次，两个报告文件字节完全相同（报告里不能带运行时间戳）。
+    连跑两次，两个报告文件字节完全相同。
     """
     data = make_curve(seed=907)
     first, ctx1 = run_case(data)
-    if not _complete(first):
-        return False
+    for key in NEED:
+        assert key in first, "第一次运行就缺字段 %s" % key
     body1 = open(ctx1["out"], "rb").read()
     second, ctx2 = run_case(data)
-    if second is None:
-        return False
-    return body1 == open(ctx2["out"], "rb").read()
+    assert second is not None, "第二次运行没有产出报告"
+    body2 = open(ctx2["out"], "rb").read()
+    assert body1 == body2, "两次运行报告字节不一致（是不是写了时间戳）"
 
 
 def test_failed_run_keeps_previous_report():
@@ -372,32 +433,14 @@ def test_failed_run_keeps_previous_report():
     with open(dpath, "w", encoding="utf-8") as f:
         json.dump(good, f, ensure_ascii=False)
     first = _run(dpath, opath)
-    if first.returncode != 0 or not os.path.exists(opath):
-        return False
+    assert first.returncode == 0, "合格记录应退出 0，实际 %r" % first.returncode
+    assert os.path.exists(opath), "合格记录没有产出报告"
     before = open(opath, "rb").read()
     broken = json.loads(json.dumps(good))
     broken["samples"][5]["t"] = broken["samples"][4]["t"]
     with open(dpath, "w", encoding="utf-8") as f:
         json.dump(broken, f, ensure_ascii=False)
     second = _run(dpath, opath)
-    if second.returncode != 2:
-        return False
-    return open(opath, "rb").read() == before
-
-
-def main():
-    total = 0.0
-    for name, weight in WEIGHTS.items():
-        fn = globals().get(name)
-        try:
-            passed = bool(fn and fn())
-        except Exception as e:  # noqa: BLE001 —— 任何异常都按不通过计
-            print("%s: 异常 %r" % (name, e), file=sys.stderr)
-            passed = False
-        total += weight * passed
-        print("%s: %s (权重 %.2f)" % (name, "PASS" if passed else "FAIL", weight), file=sys.stderr)
-    print("%.6f" % total)
-
-
-if __name__ == "__main__":
-    main()
+    assert second.returncode == 2, "坏记录应退出 2，实际 %r" % second.returncode
+    after = open(opath, "rb").read()
+    assert after == before, "运行失败把上一次的报告覆盖了"

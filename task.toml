@@ -2,9 +2,9 @@ schema_version = "1.3"
 
 [task]
 name = "local/biexp-decay-fit"
-description = "闪烁体衰减曲线的双指数分解与限幅点剔除"
+description = "闪烁体衰减曲线的双指数分解、读出堆积反解与限幅点剔除"
 authors = [{ name = "shuai" }]
-keywords = ["python", "双指数拟合", "时间常数", "衰减曲线"]
+keywords = ["python", "双指数拟合", "时间常数", "堆积校正", "衰减曲线"]
 
 [agent]
 timeout_sec = 3600
@@ -23,5 +23,5 @@ timeout_sec = 300
 [metadata]
 difficulty = "hard"
 category = "物理模拟"
-tags = ["python", "biexponential-fit", "decay-time", "grid-search"]
+tags = ["python", "biexponential-fit", "pileup-correction", "decay-time", "grid-search"]
 expert_time_estimate = "3h"
