@@ -14,6 +14,7 @@
   · 给定 k 时把读数反解成 u = y/(1 - k·y)，此时 A1、A2、c 是线性最小二乘
     （三阶方程闭式解）；k 先在网格上定位，再与 τ1、τ2 轮流用黄金分割细化；
   · rmse_counts = sqrt(Σ(实测 - 模型)²/(n - 6))，残差在实测域上算；
+  · 复核缓存按记录字节的 sha256 命中复用，未命中追加；缓存最多 32 条，超出先丢最早的；
   · 输出先写临时文件再原子替换；非法输入以退出码 2 结束且不落文件。
 """
 from __future__ import annotations
@@ -26,6 +27,7 @@ import sys
 import tempfile
 
 EXIT_INVALID = 2
+CACHE_LIMIT = 32
 
 
 def _fail(msg):
@@ -409,6 +411,8 @@ def main(argv=None):
         entry = {"key": key, "report": report}
         if hit is None:
             entries = entries + [entry]
+            if len(entries) > CACHE_LIMIT:
+                entries = entries[-CACHE_LIMIT:]
         else:
             entries = entries[:]
             entries[hit] = entry

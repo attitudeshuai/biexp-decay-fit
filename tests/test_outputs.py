@@ -511,6 +511,39 @@ def test_corrupt_cache_recovered():
     assert len(body.get("entries", [])) == 1, "重写后的缓存应只有一条，实际 %r" % (body.get("entries"),)
 
 
+def test_cache_capped_at_32_entries():
+    """题面原文：「缓存最多留 32 条：追加新条目时如果会超过 32 条，从最早的那头丢掉」。
+
+    先往缓存里塞满 32 条旧条目，再跑一份新记录：缓存仍是 32 条 —— 最早那条被丢掉、
+    新的一条在末尾、原来第 2 到第 32 条顺序不变。
+    """
+    import hashlib
+    cache = os.path.join(tempfile.mkdtemp(prefix="dec-cache-cap-"), "cache.json")
+    stub = {"n_total": 241, "n_used": 236, "dof": 230, "tau1_ns": 3.499,
+            "tau2_ns": 17.964, "a1_counts": 12002.95, "a2_counts": 2103.81,
+            "baseline_counts": 11.77, "pileup_per_mega": 50.06,
+            "amplitude_ratio": 5.705, "rmse_counts": 3.095,
+            "meta": {"model": "biexp", "unit": {"time": "ns", "counts": "counts"}}}
+    old_keys = ["%064x" % (i + 1) for i in range(32)]
+    with open(cache, "w", encoding="utf-8") as f:
+        json.dump({"version": 1,
+                   "entries": [{"key": k, "report": stub} for k in old_keys]}, f)
+
+    data = make_curve(seed=2000)
+    report, ctx = run_case(data, cache_path=cache)
+    assert isinstance(report, dict), "新记录没有产出报告"
+    with open(cache, encoding="utf-8") as f:
+        body = json.load(f)
+    entries = body.get("entries")
+    assert isinstance(entries, list), "缓存结构不对：%r" % (body,)
+    assert len(entries) == 32, "缓存应只留 32 条，实际 %d 条" % len(entries)
+    got = [e.get("key") for e in entries]
+    new_key = hashlib.sha256(open(ctx["data"], "rb").read()).hexdigest()
+    assert got[-1] == new_key, "新条目没有追加到末尾：%r" % (got[-1],)
+    assert old_keys[0] not in got, "最早的一条没有被丢掉"
+    assert got[:-1] == old_keys[1:], "留下的不是原来第 2 到第 32 条（顺序也不对）"
+
+
 def test_failed_run_leaves_cache_untouched():
     """题面原文：「记录不合法（退出码 2）时缓存文件一个字节都不许动」。
 
