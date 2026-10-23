@@ -36,7 +36,7 @@
 
 推理轴：领域公式（两种堆积模型）
 
-落在推理路径上的哪里：读出电路的堆积有两种模型，记录里的 `instrument.pileup_model` 写 `paralyzable` 时要换成 y = u·exp(-k·u)，这条没有闭式反解，得用数值迭代把 u 解出来；写成非瘫痪型那条式子，高计数段的形状整个对不上。记录若带 `calibration`（若干真实计数率 → 读数标定点），堆积系数必须先在标定点上单独定出来再反解曲线，把标定点丢掉、直接连曲线一起联合拟合，k 会被拟合残差带偏。
+落在推理路径上的哪里：读出电路的堆积有两种模型，记录里的 `instrument.pileup_model` 写 `paralyzable` 时要换成 y = u·exp(-k·u)，这条没有闭式反解，得用数值迭代把 u 解出来；写成非瘫痪型那条式子，高计数段的形状整个对不上。记录若带 `calibration`（若干真实计数率 到 读数标定点），堆积系数必须先在标定点上单独定出来再反解曲线，把标定点丢掉、直接连曲线一起联合拟合，k 会被拟合残差带偏。
 
 对应测试：test_calibration_pins_pileup_coefficient、test_paralyzable_pileup_model
 
