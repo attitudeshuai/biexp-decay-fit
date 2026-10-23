@@ -388,7 +388,7 @@ def test_tau_pair_matches_independent_fit():
 
 
 def test_pileup_coefficient_recovered():
-    """题面原文：「仪器读到的是 y = u / (1 + k·u)……记录里不写 k，要拿曲线本身估出来」。
+    """题面原文：「堆积系数（单位：每计数）」。
 
     真实 k=5e-5（换算成 pileup_per_mega 是 50）与 k=1.2e-4（120）两条曲线各跑一次：
     报告值与独立复算相差不超过 10%，且不能把 k 当 0 处理（拿 k=0 拟合会偏出 25%以上）。
@@ -406,7 +406,7 @@ def test_pileup_coefficient_recovered():
 
 
 def test_near_degenerate_components_resolved():
-    """题面原文：「两个时间常数拉不开时也要分开，不能退化成一个指数」对应的近简并情形。
+    """题面原文：「两个时间常数靠近时也要分开」对应的近简并情形。
 
     τ1=4 ns、τ2=11 ns 的曲线（比值约 2.7，比出厂曲线近得多）：两个时间常数相差不超过 5%，
     幅度相差不超过 10%。单指数拟合在这里会整体跑偏。
@@ -425,7 +425,7 @@ def test_near_degenerate_components_resolved():
 
 
 def test_saturated_points_removed():
-    """题面原文：「读数落在探测器上限附近……的点是被限幅的，整点剔除、不参与拟合」。
+    """题面原文：「读数落在探测器上限附近」。
 
     出厂曲线前段有 5 个点顶在上限：n_used 必须只算未饱和点，参数不受影响；
     把限幅点算进去会让 tau1 偏掉 5% 以上。
@@ -445,7 +445,7 @@ def test_saturated_points_removed():
 
 
 def test_second_curve_with_other_rates():
-    """题面原文：「复检会喂别的样品曲线，时间常数、幅度比、堆积系数与噪声水平都不同」。
+    """题面原文：「复检会换样品曲线的时间常数、幅度比、堆积系数与噪声水平」。
 
     换 τ1=1.2 ns、τ2=45 ns、幅度 12000/900、k=8e-5 的曲线后仍要吻合（时间常数 2.5%）。
     """
@@ -463,7 +463,7 @@ def test_second_curve_with_other_rates():
 
 
 def test_rmse_near_noise_level():
-    """题面原文：「报告给出 rmse = sqrt(残差平方和 /(n - 6))，残差在实测读数上算」。
+    """题面原文：「rmse = sqrt(残差平方和 /(n - 6))」。
 
     噪声 σ=3 counts：rmse 落在 2 到 5 之间，且与独立复算相差不超过 20%。
     """
@@ -477,7 +477,7 @@ def test_rmse_near_noise_level():
 
 
 def test_baseline_and_ratio_consistent():
-    """题面原文：「amplitude_ratio = a1 / a2」，基线是本底计数。
+    """题面原文：「amplitude_ratio = A1 / A2」
 
     基线在 8 到 16 counts 之间（真值 12），amplitude_ratio 与 a1/a2 一致（0.5%）。
     """
@@ -494,7 +494,7 @@ def test_baseline_and_ratio_consistent():
 
 
 def test_paralyzable_pileup_model():
-    """题面原文：「堆积模型写在 instrument.pileup_model 里：非瘫痪型 y = u/(1 + k·u)，瘫痪型 y = u·exp(-k·u)」。
+    """题面原文：「反解 u 时要按对应的式子解」。
 
     换一条瘫痪型堆积的曲线（k=2e-4）：两个时间常数与独立复算相差不超过 3%，
     堆积系数不超过 12%。把它当非瘫痪型反解、或者干脆不反解，都会明显跑偏。
@@ -514,7 +514,7 @@ def test_paralyzable_pileup_model():
 
 
 def test_calibration_pins_pileup_coefficient():
-    """题面原文：「记录若带 calibration，堆积系数必须先在标定点上定出来」。
+    """题面原文：「堆积系数必须先在标定点上定出来」。
 
     强堆积样品（k=3.5e-4，峰值处被压到三成）：只靠曲线本身，k 与两个时间常数会退化；
     先用 5 个标定点定 k 再反解，报告的 k 与真值差不超过 5%、与独立复算不超过 2%。
@@ -537,7 +537,7 @@ def test_calibration_pins_pileup_coefficient():
 
 
 def test_invalid_data_rejected_without_output():
-    """题面原文：「记录不合法时以退出码 2 结束、往 stderr 写原因、不产出报告」。
+    """题面原文：「并说明原因，标定卡不落盘」。
 
     四种坏记录：采样点不足 100、时间不单调、探测器上限非正、有效点不足。
     每种都要退出码 2、stderr 有原因、目录里不留报告也不留临时文件。
@@ -571,7 +571,7 @@ def test_invalid_data_rejected_without_output():
 
 
 def test_report_schema_and_rounding():
-    """题面原文：「tau1_ns / tau2_ns / amplitude_ratio / rmse_counts 保留三位小数；a1_counts / a2_counts / baseline_counts / pileup_per_mega 保留两位」。
+    """题面原文：「两个时间常数三位、两个幅度与基线两位」。
 
     校验顶层字段、位数、dof 与 tau1 < tau2，文件里不出现 NaN 或 Infinity。
     """
@@ -594,7 +594,7 @@ def test_report_schema_and_rounding():
 
 
 def test_rerun_produces_identical_bytes():
-    """题面原文：「同一份记录重复运行，报告逐字节一致（不要写时间戳之类的运行期信息）」。
+    """题面原文：「同一条波形重复标定，两次输出必须逐字节一致」。
 
     连跑两次，两个报告文件字节完全相同。
     """
@@ -610,7 +610,7 @@ def test_rerun_produces_identical_bytes():
 
 
 def test_failed_run_keeps_previous_report():
-    """题面原文：「运行失败时不能覆盖上一次已经写好的报告」。
+    """题面原文：「标定失败时不得覆盖已经存在的标定卡」。
 
     先跑一次合格记录留下报告，再用时间不单调的坏记录跑：退出码 2，旧报告字节不变。
     """
@@ -635,7 +635,7 @@ def test_failed_run_keeps_previous_report():
 
 
 def test_cache_reuse_and_append():
-    """题面原文：「这个 key 已在缓存里就原地替换该条目的 report；不在就追加到末尾」。
+    """题面原文：「已在缓存里就原地替换该条目的」。
 
     连跑三次：同一份记录跑两次（中间把缓存里那条报告的 tau1_ns 改成哨兵值 999），
     第二次必须直接复用缓存、报出哨兵值；换一份记录再跑，缓存变成两条、顺序不变。
@@ -660,7 +660,7 @@ def test_cache_reuse_and_append():
     with open(cache, "w", encoding="utf-8") as f:
         json.dump(body, f, ensure_ascii=False)
     report_again, _ = run_case(data_a, cache_path=cache)
-    assert float(report_again.get("fast_tau_ns", 0.0)) == 999.0, \
+    assert abs(float(report_again.get("fast_tau_ns", 0.0)) - 999.0) <= 1e-9, \
         "第二次跑同一份记录没有复用缓存：tau1_ns=%r" % (report_again.get("fast_tau_ns"),)
 
     data_b = make_curve(seed=1409)
@@ -768,7 +768,7 @@ def test_failed_run_leaves_cache_untouched():
 
 
 def test_zero_calibration_rate_rejected():
-    """题面原文：「calibration 的 true_counts/observed 必须是正数」。
+    """题面原文：「标定点里真实计数与读数都必须是正数」。
 
     把标定点的真计数率设成 0（边界值）：必须退出码 2 且不产出标定卡。
     """
