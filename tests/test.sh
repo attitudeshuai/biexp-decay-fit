@@ -5,6 +5,11 @@
 # 三者缺一即按 0 记（INCOMPLETE 不许拿满分）。
 set -u
 
+# 评分脚本：先把评分环境隔离（不让被测目录里同名模块劫持 import），再跑测试。
+#   · cd / 且 python3 -P：不让工作目录进 sys.path，挡住 /app/pytest.py 这类同名劫持
+#   · env -u PYTHON*：挡住 PYTHONPATH / sitecustomize 注入
+#   · 解释器走绝对路径：挡住 PATH 上的同名 python3
+
 LOG_DIR=/logs/verifier
 mkdir -p "$LOG_DIR"
 echo 0 > "$LOG_DIR/reward.txt"
@@ -12,13 +17,13 @@ DONE=0
 trap '[ "$DONE" = 1 ] || echo 0 > "$LOG_DIR/reward.txt"' EXIT
 trap 'exit 1' INT TERM HUP
 
-cd /app
+cd /
 
 # 判分工具不预装进镜像：pytest 随包放在 /tests/wheels，验证阶段离线安装
-pip install --no-index --find-links /tests/wheels --quiet pytest > "$LOG_DIR/pip.log" 2>&1 || true
+/usr/local/bin/python3 -m pip install --no-index --find-links /tests/wheels --quiet pytest > "$LOG_DIR/pip.log" 2>&1 || true
 
 rm -f "$LOG_DIR/weighted.txt"
-timeout 240 python3 -m pytest /tests -q -p no:cacheprovider -o addopts="" \
+timeout 240 env -u PYTHONPATH -u PYTHONHOME -u PYTHONSTARTUP /usr/local/bin/python3 -P -m pytest /tests -q -p no:cacheprovider -o addopts="" \
     --junitxml="$LOG_DIR/pytest.xml" > "$LOG_DIR/pytest.log" 2>&1 || true
 
 SCORE=0
