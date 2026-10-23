@@ -7,7 +7,8 @@
 
 口径：
   · 真实波形 u(t) = A1·exp(-t/τ1) + A2·exp(-t/τ2) + c，约定 τ1 < τ2；
-  · 读出电路有堆积：仪器看到的计数是 y = u/(1 + k·u)，k 是堆积系数（每计数），
+  · 读出电路有堆积，模型写在 instrument.pileup_model 里：非瘫痪型 y = u/(1 + k·u)，
+    瘫痪型 y = u·exp(-k·u)（反解要牛顿迭代）；k 是堆积系数（每计数），
     记录里不给，要和曲线一起估出来；
   · 探测器上限写在 instrument.saturation_counts 里，读数落在上限附近（差不超过
     saturation_margin）的点是被限幅的，必须整点剔除、不参与拟合；
@@ -59,6 +60,10 @@ def load_data(path):
     if not isinstance(min_used, int) or isinstance(min_used, bool) or min_used < 20:
         _fail("fit.min_used 要是不小于 20 的整数")
 
+    model = (inst.get("pileup_model") or "nonparalyzable")
+    if model not in ("nonparalyzable", "paralyzable"):
+        _fail("instrument.pileup_model 只认 nonparalyzable / paralyzable")
+
     samples = raw.get("samples")
     if not isinstance(samples, list) or len(samples) < 100:
         _fail("samples 至少要 100 个采样点")
@@ -78,7 +83,7 @@ def load_data(path):
         times.append(t)
         ys.append(y)
     return {"times": times, "ys": ys, "sat": float(sat), "margin": float(margin),
-            "min_used": int(min_used), "unit": (raw.get("unit") or {})}
+            "min_used": int(min_used), "unit": (raw.get("unit") or {}), "model": model}
 
 
 def keep_unsaturated(ys, sat, margin):
@@ -105,21 +110,53 @@ def solve3(a, b):
     return [m[0][3], m[1][3], m[2][3]]
 
 
-def _invert(ys, k):
-    """把堆积后的读数反解回真实计数 u = y/(1 - k·y)。"""
-    out = []
-    for y in ys:
+def _invert_one(y, k, model):
+    """把读数反解回真实计数。非瘫痪型闭式；瘫痪型要用不动点/牛顿迭代。"""
+    if model == "nonparalyzable":
         d = 1.0 - k * y
         if d < 0.02:
             return None
-        out.append(y / d)
+        return y / d
+    # 瘫痪型：解 u·exp(-k·u) = y，牛顿法，初值取 y
+    u = y
+    for _ in range(200):
+        e = math.exp(-k * u)
+        f = u * e - y
+        df = e * (1.0 - k * u)
+        if df <= 0:
+            return None
+        step = f / df
+        u -= step
+        if u < 0:
+            u = y * 0.5
+        if abs(step) <= 1e-13 * max(1.0, abs(u)):
+            break
+    if not math.isfinite(u) or u <= 0:
+        return None
+    return u
+
+
+def _invert(ys, k, model="nonparalyzable"):
+    out = []
+    for y in ys:
+        v = _invert_one(y, k, model)
+        if v is None:
+            return None
+        out.append(v)
     return out
 
 
-def _model_obs(t, tau1, tau2, a1, a2, base, k):
+def _forward(u, k, model):
+    """真实计数过一遍读出堆积后的读数。"""
+    if model == "nonparalyzable":
+        return u / (1.0 + k * u)
+    return u * math.exp(-k * u)
+
+
+def _model_obs(t, tau1, tau2, a1, a2, base, k, model="nonparalyzable"):
     """模型在实测域上的取值：u 先算出来，再走一遍堆积。"""
     u = a1 * math.exp(-t / tau1) + a2 * math.exp(-t / tau2) + base
-    return u / (1.0 + k * u)
+    return _forward(u, k, model)
 
 
 def _linear_fit(ts, ys, tau1, tau2):
@@ -166,22 +203,23 @@ def _solve(a, b):
     return [m[i][n] for i in range(n)]
 
 
-def _sse_params(ts, ys, p):
+def _sse_params(ts, ys, p, model="nonparalyzable"):
     t1, t2, a1, a2, c, k = p
     if t1 <= 0 or t2 <= t1 or k < 0:
         return None
     acc = 0.0
     for t, y in zip(ts, ys):
         u = a1 * math.exp(-t / t1) + a2 * math.exp(-t / t2) + c
-        m = u / (1.0 + k * u)
-        acc += (y - m) ** 2
+        if u <= 0:
+            return None
+        acc += (y - _forward(u, k, model)) ** 2
     return acc
 
 
-def _refine(ts, ys, p, iters=120):
+def _refine(ts, ys, p, model="nonparalyzable", iters=120):
     """实测域残差上的 Levenberg-Marquardt 精修，六个参数一起动。"""
     p = list(p)
-    sse = _sse_params(ts, ys, p)
+    sse = _sse_params(ts, ys, p, model)
     if sse is None:
         return None
     lam = 1e-3
@@ -193,13 +231,18 @@ def _refine(ts, ys, p, iters=120):
             e1 = math.exp(-t / t1)
             e2 = math.exp(-t / t2)
             u = a1 * e1 + a2 * e2 + c
-            w = 1.0 / (1.0 + k * u)
-            w2 = w * w
-            m = u * w
-            # dy/d参数
-            jac = [w2 * a1 * e1 * t / (t1 * t1),
-                   w2 * a2 * e2 * t / (t2 * t2),
-                   w2 * e1, w2 * e2, w2, -u * u * w2]
+            if model == "nonparalyzable":
+                w = 1.0 / (1.0 + k * u)
+                g = w * w
+                m = u * w
+            else:
+                e = math.exp(-k * u)
+                g = e * (1.0 - k * u)
+                m = u * e
+            # dy/d参数；对 k 的偏导两种模型都等于 -u²·g
+            jac = [g * a1 * e1 * t / (t1 * t1),
+                   g * a2 * e2 * t / (t2 * t2),
+                   g * e1, g * e2, g, -u * u * g]
             r = y - m
             for i in range(6):
                 jtr[i] += jac[i] * r
@@ -217,7 +260,7 @@ def _refine(ts, ys, p, iters=120):
                 continue
             trial = [p[i] + step[i] for i in range(6)]
             trial[5] = max(0.0, trial[5])
-            new = _sse_params(ts, ys, trial)
+            new = _sse_params(ts, ys, trial, model)
             if new is not None and new < sse:
                 p = trial
                 sse = new
@@ -253,15 +296,15 @@ def _golden(fn, lo, hi, iters=60):
 K_GRID = (0.0, 1.5e-5, 3.0e-5, 5.0e-5, 8.0e-5, 1.3e-4, 2.0e-4)
 
 
-def fit_biexp(ts, ys):
+def fit_biexp(ts, ys, model="nonparalyzable"):
     t_min = min(ts)
     t_max = max(ts)
     span = max(t_max - t_min, 1e-9)
     t1_lo, t1_hi = span / 500.0, span / 5.0
     # 第一步：在（τ1、τ2、k）三维网格上粗定位，系数用反解后的线性最小二乘
-    best = None
+    cands = []
     for k in K_GRID:
-        yy = _invert(ys, k)
+        yy = _invert(ys, k, model)
         if yy is None:
             continue
         for i in range(17):
@@ -274,17 +317,30 @@ def fit_biexp(ts, ys):
                 if coef is None:
                     continue
                 cand = [tau1, tau2, coef[0], coef[1], coef[2], k]
-                val = _sse_params(ts, ys, cand)
-                if val is not None and (best is None or val < best[0]):
-                    best = (val, cand)
-    if best is None:
+                val = _sse_params(ts, ys, cand, model)
+                if val is not None:
+                    cands.append((val, cand))
+    if not cands:
         return None
-    # 第二步：实测域残差上的 LM 精修
-    out = _refine(ts, ys, best[1])
-    if out is None:
-        p, sse = best[1], best[0]
-    else:
-        p, sse = out
+    # 第二步：取最好的几个起点分别做实测域 LM，选最优（k 的盆地浅，单起点会卡在 k=0）
+    cands.sort(key=lambda t: t[0])
+    seeds = []
+    for val, cand in cands:
+        if all(abs(cand[5] - c[5]) > 1e-9 for c in seeds):
+            seeds.append(cand)
+        if len(seeds) >= 4:
+            break
+    best_p, best_sse = None, None
+    for seed in seeds:
+        out = _refine(ts, ys, seed, model)
+        if out is None:
+            continue
+        p_try, sse_try = out
+        if best_sse is None or sse_try < best_sse:
+            best_p, best_sse = p_try, sse_try
+    if best_p is None:
+        best_p, best_sse = cands[0][1], cands[0][0]
+    p, sse = best_p, best_sse
     tau1, tau2, a1, a2, c, k = p
     if tau1 >= tau2:
         tau1, tau2, a1, a2 = tau2, tau1, a2, a1
@@ -299,7 +355,7 @@ def analyse(scan):
         _fail("剔除饱和点后只剩 %d 个有效点，少于要求的 %d" % (len(idx), scan["min_used"]))
     ts = [scan["times"][i] for i in idx]
     ys = [scan["ys"][i] for i in idx]
-    fit = fit_biexp(ts, ys)
+    fit = fit_biexp(ts, ys, scan["model"])
     if fit is None:
         _fail("拟合失败，数据不足以定出参数")
     dof = len(ts) - 6

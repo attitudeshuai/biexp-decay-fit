@@ -26,7 +26,7 @@ class _Lcg(object):
 
 def make_curve(a1=12000.0, tau1=3.5, a2=2100.0, tau2=18.0, base=12.0,
                dt_ns=0.5, duration_ns=120.0, sigma=3.0, saturation=6000.0,
-               pileup=5.0e-5, seed=101):
+               pileup=5.0e-5, model="nonparalyzable", seed=101):
     """造一条带堆积与限幅的双指数曲线。"""
     rng = _Lcg(seed)
     n = int(round(duration_ns / dt_ns)) + 1
@@ -35,12 +35,13 @@ def make_curve(a1=12000.0, tau1=3.5, a2=2100.0, tau2=18.0, base=12.0,
         t = round(i * dt_ns, 2)
         u = a1 * math.exp(-t / tau1) + a2 * math.exp(-t / tau2) + base
         u += (rng.next_u() + rng.next_u() - 1.0) * math.sqrt(6.0) * sigma
-        y = u / (1.0 + pileup * u)
+        y = u / (1.0 + pileup * u) if model == "nonparalyzable" else u * math.exp(-pileup * u)
         if y > saturation:
             y = saturation
         samples.append({"t": t, "y": round(y, 3)})
     return {"unit": {"time": "ns", "counts": "counts"},
-            "instrument": {"saturation_counts": saturation, "time_step_ns": dt_ns},
+            "instrument": {"saturation_counts": saturation, "time_step_ns": dt_ns,
+                           "pileup_model": model},
             "samples": samples,
             "fit": {"saturation_margin": 0.5, "min_used": 40}}
 
@@ -77,21 +78,48 @@ def _fit_lin(ts, ys, t1, t2):
     return _solve(xtx, xty)
 
 
-def _sse_params(ts, ys, p):
+def _forward(u, k, model):
+    if model == "nonparalyzable":
+        return u / (1.0 + k * u)
+    return u * math.exp(-k * u)
+
+
+def _invert_one(y, k, model):
+    if model == "nonparalyzable":
+        d = 1.0 - k * y
+        return None if d < 0.02 else y / d
+    u = y
+    for _ in range(200):
+        e = math.exp(-k * u)
+        df = e * (1.0 - k * u)
+        if df <= 0:
+            return None
+        step = (u * e - y) / df
+        u -= step
+        if u < 0:
+            u = 0.5 * y
+        if abs(step) <= 1e-13 * max(1.0, abs(u)):
+            break
+    return u if math.isfinite(u) and u > 0 else None
+
+
+def _sse_params(ts, ys, p, model="nonparalyzable"):
     t1, t2, a1, a2, c, k = p
     if t1 <= 0 or t2 <= t1 or k < 0:
         return None
     acc = 0.0
     for t, y in zip(ts, ys):
         u = a1 * math.exp(-t / t1) + a2 * math.exp(-t / t2) + c
-        acc += (y - u / (1.0 + k * u)) ** 2
+        if u <= 0:
+            return None
+        acc += (y - _forward(u, k, model)) ** 2
     return acc
 
 
-def _lm(ts, ys, p, iters=90):
+def _lm(ts, ys, p, model="nonparalyzable", iters=90):
     """实测读数上的 Levenberg-Marquardt（本轮不用矩阵库，自己解正规方程）。"""
     p = list(p)
-    sse = _sse_params(ts, ys, p)
+    sse = _sse_params(ts, ys, p, model)
     if sse is None:
         return None, None
     lam = 1e-2
@@ -103,12 +131,18 @@ def _lm(ts, ys, p, iters=90):
             e1 = math.exp(-t / t1)
             e2 = math.exp(-t / t2)
             u = a1 * e1 + a2 * e2 + c
-            w = 1.0 / (1.0 + k * u)
-            w2 = w * w
-            jac = [w2 * a1 * e1 * t / (t1 * t1),
-                   w2 * a2 * e2 * t / (t2 * t2),
-                   w2 * e1, w2 * e2, w2, -u * u * w2]
-            r = y - u * w
+            if model == "nonparalyzable":
+                w = 1.0 / (1.0 + k * u)
+                g = w * w
+                m = u * w
+            else:
+                e = math.exp(-k * u)
+                g = e * (1.0 - k * u)
+                m = u * e
+            jac = [g * a1 * e1 * t / (t1 * t1),
+                   g * a2 * e2 * t / (t2 * t2),
+                   g * e1, g * e2, g, -u * u * g]
+            r = y - m
             for i in range(6):
                 jtr[i] += jac[i] * r
                 for j in range(6):
@@ -125,7 +159,7 @@ def _lm(ts, ys, p, iters=90):
                 continue
             trial = [p[i] + step[i] for i in range(6)]
             trial[5] = max(0.0, trial[5])
-            new = _sse_params(ts, ys, trial)
+            new = _sse_params(ts, ys, trial, model)
             if new is not None and new < sse:
                 p, sse = trial, new
                 lam = max(lam / 3.0, 1e-10)
@@ -139,6 +173,7 @@ def _lm(ts, ys, p, iters=90):
 
 def expect(data):
     """独立复算：剔限幅点，粗网格定位后精修，返回期望的六个参数与 rmse。"""
+    model = data["instrument"].get("pileup_model") or "nonparalyzable"
     sat = float(data["instrument"]["saturation_counts"])
     margin = float(data["fit"]["saturation_margin"])
     ts, ys = [], []
@@ -149,10 +184,13 @@ def expect(data):
         ys.append(float(s["y"]))
     span = max(ts) - min(ts)
     lo, hi = span / 500.0, span / 5.0
-    best = None
-    for k in (0.0, 1.2e-5, 3.5e-5, 6.5e-5, 1.1e-4):
-        d = 1.0 - k * max(ys)
-        if d < 0.05:
+    cands = []
+    k_grid = (0.0, 2.0e-5, 5.0e-5, 1.0e-4, 2.0e-4, 3.5e-4)
+    for k in k_grid:
+        if model == "nonparalyzable" and 1.0 - k * max(ys) < 0.05:
+            continue
+        inv = [_invert_one(y, k, model) for y in ys]
+        if any(v is None for v in inv):
             continue
         for i in range(13):
             t1 = lo * (hi / lo) ** (i / 12.0)
@@ -160,14 +198,30 @@ def expect(data):
                 t2 = t1 * 1.2 * (200.0 ** (j / 12.0))
                 if t2 <= t1:
                     continue
-                coef = _fit_lin(ts, [y / (1.0 - k * y) for y in ys], t1, t2)
+                coef = _fit_lin(ts, inv, t1, t2)
                 if coef is None:
                     continue
                 cand = [t1, t2, coef[0], coef[1], coef[2], k]
-                val = _sse_params(ts, ys, cand)
-                if val is not None and (best is None or val < best[0]):
-                    best = (val, cand)
-    p, sse = _lm(ts, ys, best[1])
+                val = _sse_params(ts, ys, cand, model)
+                if val is not None:
+                    cands.append((val, cand))
+    cands.sort(key=lambda t: t[0])
+    seeds = []
+    for val, cand in cands:
+        if all(abs(cand[5] - c[5]) > 1e-9 for c in seeds):
+            seeds.append(cand)
+        if len(seeds) >= 4:
+            break
+    best_p, best_sse = None, None
+    for seed in seeds:
+        p_try, sse_try = _lm(ts, ys, seed, model)
+        if p_try is None:
+            continue
+        if best_sse is None or sse_try < best_sse:
+            best_p, best_sse = p_try, sse_try
+    if best_p is None:
+        best_p, best_sse = cands[0][1], cands[0][0]
+    p, sse = best_p, best_sse
     if p is None:
         p, sse = best[1], best[0]
     t1, t2, a1, a2, c, k = p
@@ -234,13 +288,13 @@ def test_tau_pair_matches_independent_fit():
     tau2 = _num(report, "tau2_ns")
     a1 = _num(report, "a1_counts")
     a2 = _num(report, "a2_counts")
-    assert abs(tau1 - exp["tau1"]) <= 0.02 * exp["tau1"], \
+    assert abs(tau1 - exp["tau1"]) <= 0.003 * exp["tau1"], \
         "tau1 差得太多：被测 %r，独立复算 %r" % (tau1, exp["tau1"])
-    assert abs(tau2 - exp["tau2"]) <= 0.02 * exp["tau2"], \
+    assert abs(tau2 - exp["tau2"]) <= 0.003 * exp["tau2"], \
         "tau2 差得太多：被测 %r，独立复算 %r" % (tau2, exp["tau2"])
-    assert abs(a1 - exp["a1"]) <= 0.05 * abs(exp["a1"]), \
+    assert abs(a1 - exp["a1"]) <= 0.01 * abs(exp["a1"]), \
         "a1 差得太多：被测 %r，独立复算 %r" % (a1, exp["a1"])
-    assert abs(a2 - exp["a2"]) <= 0.05 * abs(exp["a2"]), \
+    assert abs(a2 - exp["a2"]) <= 0.01 * abs(exp["a2"]), \
         "a2 差得太多：被测 %r，独立复算 %r" % (a2, exp["a2"])
 
 
@@ -256,7 +310,7 @@ def test_pileup_coefficient_recovered():
         exp = expect(data)
         got = _num(report, "pileup_per_mega")
         want = exp["pileup"] * 1e6
-        assert abs(got - want) <= 0.10 * abs(want), \
+        assert abs(got - want) <= 0.03 * abs(want), \
             "堆积系数差得太多：被测 %r，独立复算 %r" % (got, want)
         assert abs(got - true_k * 1e6) <= 0.25 * true_k * 1e6, \
             "报告值离真实堆积系数太远：被测 %r，真实 %r" % (got, true_k * 1e6)
@@ -348,6 +402,26 @@ def test_baseline_and_ratio_consistent():
     want = a1 / a2
     assert abs(ratio - want) <= 0.005 * abs(want), \
         "amplitude_ratio 与 a1/a2 不一致：%r 对 %r" % (ratio, want)
+
+
+def test_paralyzable_pileup_model():
+    """题面原文：「堆积模型写在 instrument.pileup_model 里：非瘫痪型 y = u/(1 + k·u)，瘫痪型 y = u·exp(-k·u)」。
+
+    换一条瘫痪型堆积的曲线（k=2e-4）：两个时间常数与独立复算相差不超过 3%，
+    堆积系数不超过 12%。把它当非瘫痪型反解、或者干脆不反解，都会明显跑偏。
+    """
+    data = make_curve(pileup=2.0e-4, model="paralyzable", seed=1311)
+    report, _ = run_case(data)
+    exp = expect(data)
+    tau1 = _num(report, "tau1_ns")
+    tau2 = _num(report, "tau2_ns")
+    k = _num(report, "pileup_per_mega")
+    assert abs(tau1 - exp["tau1"]) <= 0.03 * exp["tau1"], \
+        "瘫痪型下 tau1 偏了：被测 %r，独立复算 %r" % (tau1, exp["tau1"])
+    assert abs(tau2 - exp["tau2"]) <= 0.03 * exp["tau2"], \
+        "瘫痪型下 tau2 偏了：被测 %r，独立复算 %r" % (tau2, exp["tau2"])
+    assert abs(k - exp["pileup"] * 1e6) <= 0.12 * abs(exp["pileup"] * 1e6), \
+        "瘫痪型下堆积系数偏了：被测 %r，独立复算 %r" % (k, exp["pileup"] * 1e6)
 
 
 def test_invalid_data_rejected_without_output():
