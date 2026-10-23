@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "gate_tests": [
+    "test_outputs.py::test_invalid_data_rejected_without_output"
+  ],
+  "tests": {
+    "test_outputs.py::test_tau_pair_matches_independent_fit": {
+      "weight": 0.08602150537634408,
+      "rationale": "双指数分解与堆积反解（tau pair matches independent fit）"
+    },
+    "test_outputs.py::test_pileup_coefficient_recovered": {
+      "weight": 0.06451612903225806,
+      "rationale": "双指数分解与堆积反解（pileup coefficient recovered）"
+    },
+    "test_outputs.py::test_paralyzable_pileup_model": {
+      "weight": 0.07526881720430108,
+      "rationale": "双指数分解与堆积反解（paralyzable pileup model）"
+    },
+    "test_outputs.py::test_calibration_pins_pileup_coefficient": {
+      "weight": 0.12903225806451613,
+      "rationale": "双指数分解与堆积反解（calibration pins pileup coefficient）"
+    },
+    "test_outputs.py::test_near_degenerate_components_resolved": {
+      "weight": 0.07526881720430108,
+      "rationale": "双指数分解与堆积反解（near degenerate components resolved）"
+    },
+    "test_outputs.py::test_saturated_points_removed": {
+      "weight": 0.06451612903225806,
+      "rationale": "双指数分解与堆积反解（saturated points removed）"
+    },
+    "test_outputs.py::test_second_curve_with_other_rates": {
+      "weight": 0.06451612903225806,
+      "rationale": "双指数分解与堆积反解（second curve with other rates）"
+    },
+    "test_outputs.py::test_rmse_near_noise_level": {
+      "weight": 0.04301075268817204,
+      "rationale": "双指数分解与堆积反解（rmse near noise level）"
+    },
+    "test_outputs.py::test_baseline_and_ratio_consistent": {
+      "weight": 0.04301075268817204,
+      "rationale": "双指数分解与堆积反解（baseline and ratio consistent）"
+    },
+    "test_outputs.py::test_report_schema_and_rounding": {
+      "weight": 0.053763440860215055,
+      "rationale": "双指数分解与堆积反解（report schema and rounding）"
+    },
+    "test_outputs.py::test_rerun_produces_identical_bytes": {
+      "weight": 0.053763440860215055,
+      "rationale": "双指数分解与堆积反解（rerun produces identical bytes）"
+    },
+    "test_outputs.py::test_failed_run_keeps_previous_report": {
+      "weight": 0.04301075268817204,
+      "rationale": "双指数分解与堆积反解（failed run keeps previous report）"
+    },
+    "test_outputs.py::test_cache_reuse_and_append": {
+      "weight": 0.06451612903225806,
+      "rationale": "双指数分解与堆积反解（cache reuse and append）"
+    },
+    "test_outputs.py::test_cache_capped_at_32_entries": {
+      "weight": 0.06451612903225806,
+      "rationale": "双指数分解与堆积反解（cache capped at 32 entries）"
+    },
+    "test_outputs.py::test_corrupt_cache_recovered": {
+      "weight": 0.04301075268817204,
+      "rationale": "双指数分解与堆积反解（corrupt cache recovered）"
+    },
+    "test_outputs.py::test_failed_run_leaves_cache_untouched": {
+      "weight": 0.03225806451612903,
+      "rationale": "双指数分解与堆积反解（failed run leaves cache untouched）"
+    }
+  }
+}
