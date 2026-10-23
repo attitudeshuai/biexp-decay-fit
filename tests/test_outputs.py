@@ -765,3 +765,22 @@ def test_failed_run_leaves_cache_untouched():
     proc2 = _run(data2, out2, cache_path=unwritable)
     assert proc2.returncode == 2, "缓存写不进去时应退出 2，实际 %r" % proc2.returncode
     assert not os.path.exists(out2), "缓存写不进去时不该产出报告"
+
+
+def test_zero_calibration_rate_rejected():
+    """题面原文：「calibration 的 true_counts/observed 必须是正数」。
+
+    把标定点的真计数率设成 0（边界值）：必须退出码 2 且不产出标定卡。
+    """
+    data = make_curve(pileup=5.0e-5, calibration=[0.0, 2000.0, 8000.0], seed=911)
+    # 只让真计数率越界：读数保持正数，避免被别的校验先拦下
+    data["calibration"][0]["observed"] = 500.0
+    tmp = tempfile.mkdtemp(prefix="bx-bound-")
+    dpath = os.path.join(tmp, "decay.json")
+    opath = os.path.join(tmp, "report.json")
+    with open(dpath, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    proc = _run(dpath, opath)
+    assert proc.returncode == 2, "标定真计数率为 0 时退出码应为 2，实际 %r" % proc.returncode
+    assert not os.path.exists(opath), "标定真计数率为 0 时不该产出标定卡"
+

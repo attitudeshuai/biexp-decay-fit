@@ -52,7 +52,7 @@ def load_data(path):
     if not isinstance(inst, dict):
         _fail("缺 instrument")
     sat = inst.get("saturation_counts")
-    if not isinstance(sat, (int, float)) or isinstance(sat, bool) or float(sat) <= 0:
+    if not isinstance(sat, (int, float)) or isinstance(sat, bool) or not (float(sat) > 0):
         _fail("instrument.saturation_counts 要是正数")
     cfg = raw.get("fit") or {}
     margin = cfg.get("saturation_margin", 0.5)
@@ -130,9 +130,14 @@ def solve3(a, b):
     return [m[0][3], m[1][3], m[2][3]]
 
 
+def _is_paralyzable(model):
+    """记录声明的堆积模型是不是瘫痪型。"""
+    return model == "paralyzable"
+
+
 def _invert_one(y, k, model):
     """把读数反解回真实计数。非瘫痪型闭式；瘫痪型要用不动点/牛顿迭代。"""
-    if model == "nonparalyzable":
+    if not _is_paralyzable(model):
         d = 1.0 - k * y
         if d < 0.02:
             return None
@@ -168,9 +173,9 @@ def _invert(ys, k, model="nonparalyzable"):
 
 def _forward(u, k, model):
     """真实计数过一遍读出堆积后的读数。"""
-    if model == "nonparalyzable":
-        return u / (1.0 + k * u)
-    return u * math.exp(-k * u)
+    if _is_paralyzable(model):
+        return u * math.exp(-k * u)
+    return u / (1.0 + k * u)
 
 
 def _model_obs(t, tau1, tau2, a1, a2, base, k, model="nonparalyzable"):
@@ -345,7 +350,7 @@ def fit_rates(ts, ys, model, k):
         tau1 = t1_lo * (t1_hi / t1_lo) ** (i / 40.0)
         for j in range(41):
             tau2 = tau1 * 1.2 * (200.0 ** (j / 40.0))
-            if tau2 <= tau1:
+            if not (tau1 < tau2):
                 continue
             sse, coef = _sse(ts, uy, tau1, tau2)
             if sse is not None and (best is None or sse < best[0]):
@@ -362,7 +367,7 @@ def fit_rates(ts, ys, model, k):
     sse, coef = _sse(ts, uy, tau1, tau2)
     if coef is None:
         return None
-    if tau1 >= tau2:
+    if not (tau1 < tau2):
         tau1, tau2, coef[0], coef[1] = tau2, tau1, coef[1], coef[0]
     return {"tau1": tau1, "tau2": tau2, "a1": coef[0], "a2": coef[1],
             "base": coef[2], "pileup": k, "sse": sse}
@@ -382,7 +387,7 @@ def fit_biexp(ts, ys, model="nonparalyzable"):
             tau1 = t1_lo * (t1_hi / t1_lo) ** (i / 16.0)
             for j in range(17):
                 tau2 = tau1 * 1.2 * (200.0 ** (j / 16.0))
-                if tau2 <= tau1:
+                if not (tau1 < tau2):
                     continue
                 _, coef = _sse(ts, yy, tau1, tau2)
                 if coef is None:
@@ -399,7 +404,7 @@ def fit_biexp(ts, ys, model="nonparalyzable"):
     for val, cand in cands:
         if all(abs(cand[5] - c[5]) > 1e-9 for c in seeds):
             seeds.append(cand)
-        if len(seeds) >= 4:
+        if not (len(seeds) < 4):
             break
     best_p, best_sse = None, None
     for seed in seeds:
@@ -413,7 +418,7 @@ def fit_biexp(ts, ys, model="nonparalyzable"):
         best_p, best_sse = cands[0][1], cands[0][0]
     p, sse = best_p, best_sse
     tau1, tau2, a1, a2, c, k = p
-    if tau1 >= tau2:
+    if not (tau1 < tau2):
         tau1, tau2, a1, a2 = tau2, tau1, a2, a1
     return {"tau1": tau1, "tau2": tau2, "a1": a1, "a2": a2,
             "base": c, "pileup": k, "sse": sse}
