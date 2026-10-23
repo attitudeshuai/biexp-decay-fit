@@ -472,7 +472,7 @@ def test_rmse_near_noise_level():
     exp = expect(data)
     rmse = _num(report, "residual_rms")
     assert 2.0 <= rmse <= 5.0, "rmse 不在噪声量级：%r" % rmse
-    assert abs(rmse - exp["rmse"]) <= 0.20 * exp["rmse"], \
+    assert abs(rmse - exp["rmse"]) <= 0.12 * exp["rmse"], \
         "rmse 与独立复算差得太多：被测 %r，独立复算 %r" % (rmse, exp["rmse"])
 
 
