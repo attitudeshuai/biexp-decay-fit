@@ -22,7 +22,7 @@ cd /
 # 判分工具不预装进镜像：pytest 随包放在 /tests/wheels，验证阶段离线安装
 /usr/local/bin/python3 -m pip install --no-index --find-links /tests/wheels --quiet pytest > "$LOG_DIR/pip.log" 2>&1 || true
 
-rm -f "$LOG_DIR/weighted.txt"
+rm -f "$LOG_DIR/weighted.txt" "$LOG_DIR/pytest.xml"
 timeout 240 env -u PYTHONPATH -u PYTHONHOME -u PYTHONSTARTUP /usr/local/bin/python3 -P -m pytest /tests -q -p no:cacheprovider -o addopts="" \
     --junitxml="$LOG_DIR/pytest.xml" > "$LOG_DIR/pytest.log" 2>&1 || true
 
