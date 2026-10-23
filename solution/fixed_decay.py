@@ -448,18 +448,18 @@ def analyse(scan):
 def build_report(scan, res):
     ratio = res["a1"] / res["a2"] if abs(res["a2"]) > 1e-12 else 0.0
     return {
-        "n_total": res["n_total"],
-        "n_used": res["n_used"],
+        "samples_total": res["n_total"],
+        "samples_used": res["n_used"],
         "dof": res["dof"],
-        "tau1_ns": round(res["tau1"], 3),
-        "tau2_ns": round(res["tau2"], 3),
-        "a1_counts": round(res["a1"], 2),
-        "a2_counts": round(res["a2"], 2),
-        "baseline_counts": round(res["base"], 2),
-        "pileup_per_mega": round(res["pileup"] * 1e6, 2),
+        "fast_tau_ns": round(res["tau1"], 3),
+        "slow_tau_ns": round(res["tau2"], 3),
+        "fast_amplitude": round(res["a1"], 2),
+        "slow_amplitude": round(res["a2"], 2),
+        "baseline": round(res["base"], 2),
+        "pileup_scale": round(res["pileup"] * 1e6, 2),
         "amplitude_ratio": round(ratio, 3),
-        "rmse_counts": round(res["rmse"], 3),
-        "meta": {"model": "biexp", "unit": scan["unit"]},
+        "residual_rms": round(res["rmse"], 3),
+        "method_note": {"estimator": "joint-two-exponential", "unit": scan["unit"]},
     }
 
 

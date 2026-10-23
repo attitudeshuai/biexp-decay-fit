@@ -251,7 +251,7 @@ def expect(data):
     t1, t2, a1, a2, c, k = p
     dof = len(ts) - 6
     return {"tau1": t1, "tau2": t2, "a1": a1, "a2": a2, "base": c, "pileup": k,
-            "rmse": math.sqrt(sse / dof), "n_used": len(ts), "dof": dof}
+            "rmse": math.sqrt(sse / dof), "samples_used": len(ts), "dof": dof}
 
 
 # ---------------------------------------------------------------- 驱动被测程序
@@ -318,7 +318,7 @@ def expect_with_calibration(data):
     sse, coef = _sse(ts, uy, t1, t2)
     dof = len(ts) - 4
     return {"tau1": t1, "tau2": t2, "a1": coef[0], "a2": coef[1], "base": coef[2],
-            "pileup": k, "rmse": math.sqrt(sse / dof), "n_used": len(ts), "dof": dof}
+            "pileup": k, "rmse": math.sqrt(sse / dof), "samples_used": len(ts), "dof": dof}
 
 def _run(path, out_path, cache_path=None, timeout=240):
     cmd = [sys.executable, ENTRY, "--data", path, "--out", out_path]
@@ -345,9 +345,9 @@ def run_case(data, cache_path=None):
     return report, {"data": dpath, "out": opath, "proc": proc, "dir": tmp}
 
 
-NEED = {"n_total", "n_used", "dof", "tau1_ns", "tau2_ns", "a1_counts",
-        "a2_counts", "baseline_counts", "pileup_per_mega", "amplitude_ratio",
-        "rmse_counts"}
+NEED = {"samples_total", "samples_used", "dof", "fast_tau_ns", "slow_tau_ns", "fast_amplitude",
+        "slow_amplitude", "baseline", "pileup_scale", "amplitude_ratio",
+        "residual_rms"}
 
 
 def _num(report, key):
@@ -373,10 +373,10 @@ def test_tau_pair_matches_independent_fit():
     for key in NEED:
         assert key in report, "报告缺少字段 %s" % key
     exp = expect(data)
-    tau1 = _num(report, "tau1_ns")
-    tau2 = _num(report, "tau2_ns")
-    a1 = _num(report, "a1_counts")
-    a2 = _num(report, "a2_counts")
+    tau1 = _num(report, "fast_tau_ns")
+    tau2 = _num(report, "slow_tau_ns")
+    a1 = _num(report, "fast_amplitude")
+    a2 = _num(report, "slow_amplitude")
     assert abs(tau1 - exp["tau1"]) <= 0.003 * exp["tau1"], \
         "tau1 差得太多：被测 %r，独立复算 %r" % (tau1, exp["tau1"])
     assert abs(tau2 - exp["tau2"]) <= 0.003 * exp["tau2"], \
@@ -397,7 +397,7 @@ def test_pileup_coefficient_recovered():
         data = make_curve(pileup=true_k, seed=seed)
         report, _ = run_case(data)
         exp = expect(data)
-        got = _num(report, "pileup_per_mega")
+        got = _num(report, "pileup_scale")
         want = exp["pileup"] * 1e6
         assert abs(got - want) <= 0.03 * abs(want), \
             "堆积系数差得太多：被测 %r，独立复算 %r" % (got, want)
@@ -415,8 +415,8 @@ def test_near_degenerate_components_resolved():
                       saturation=9000.0, pileup=6.0e-5, seed=211)
     report, _ = run_case(data)
     exp = expect(data)
-    tau1 = _num(report, "tau1_ns")
-    tau2 = _num(report, "tau2_ns")
+    tau1 = _num(report, "fast_tau_ns")
+    tau2 = _num(report, "slow_tau_ns")
     assert abs(tau1 - exp["tau1"]) <= 0.05 * exp["tau1"], \
         "近简并曲线 tau1 偏了：被测 %r，独立复算 %r" % (tau1, exp["tau1"])
     assert abs(tau2 - exp["tau2"]) <= 0.05 * exp["tau2"], \
@@ -433,13 +433,13 @@ def test_saturated_points_removed():
     data = make_curve(seed=307)
     exp = expect(data)
     report, _ = run_case(data)
-    n_used = int(_num(report, "n_used"))
-    n_total = int(_num(report, "n_total"))
+    n_used = int(_num(report, "samples_used"))
+    n_total = int(_num(report, "samples_total"))
     assert n_total == len(data["samples"]), \
         "n_total 应为采样点总数 %d，实际 %d" % (len(data["samples"]), n_total)
-    assert n_used == exp["n_used"], \
-        "n_used 应为剔除限幅点后的 %d，实际 %d" % (exp["n_used"], n_used)
-    tau1 = _num(report, "tau1_ns")
+    assert n_used == exp["samples_used"], \
+        "n_used 应为剔除限幅点后的 %d，实际 %d" % (exp["samples_used"], n_used)
+    tau1 = _num(report, "fast_tau_ns")
     assert abs(tau1 - exp["tau1"]) <= 0.02 * exp["tau1"], \
         "剔除限幅点后 tau1 仍偏：被测 %r，独立复算 %r" % (tau1, exp["tau1"])
 
@@ -454,8 +454,8 @@ def test_second_curve_with_other_rates():
                       pileup=8.0e-5, seed=409)
     report, _ = run_case(data)
     exp = expect(data)
-    tau1 = _num(report, "tau1_ns")
-    tau2 = _num(report, "tau2_ns")
+    tau1 = _num(report, "fast_tau_ns")
+    tau2 = _num(report, "slow_tau_ns")
     assert abs(tau1 - exp["tau1"]) <= 0.025 * exp["tau1"], \
         "换曲线后 tau1 偏了：被测 %r，独立复算 %r" % (tau1, exp["tau1"])
     assert abs(tau2 - exp["tau2"]) <= 0.025 * exp["tau2"], \
@@ -470,7 +470,7 @@ def test_rmse_near_noise_level():
     data = make_curve(seed=503)
     report, _ = run_case(data)
     exp = expect(data)
-    rmse = _num(report, "rmse_counts")
+    rmse = _num(report, "residual_rms")
     assert 2.0 <= rmse <= 5.0, "rmse 不在噪声量级：%r" % rmse
     assert abs(rmse - exp["rmse"]) <= 0.20 * exp["rmse"], \
         "rmse 与独立复算差得太多：被测 %r，独立复算 %r" % (rmse, exp["rmse"])
@@ -483,9 +483,9 @@ def test_baseline_and_ratio_consistent():
     """
     data = make_curve(seed=601)
     report, _ = run_case(data)
-    base = _num(report, "baseline_counts")
-    a1 = _num(report, "a1_counts")
-    a2 = _num(report, "a2_counts")
+    base = _num(report, "baseline")
+    a1 = _num(report, "fast_amplitude")
+    a2 = _num(report, "slow_amplitude")
     ratio = _num(report, "amplitude_ratio")
     assert 8.0 <= base <= 16.0, "基线不在 12 附近：%r" % base
     want = a1 / a2
@@ -502,9 +502,9 @@ def test_paralyzable_pileup_model():
     data = make_curve(pileup=2.0e-4, model="paralyzable", seed=1311)
     report, _ = run_case(data)
     exp = expect(data)
-    tau1 = _num(report, "tau1_ns")
-    tau2 = _num(report, "tau2_ns")
-    k = _num(report, "pileup_per_mega")
+    tau1 = _num(report, "fast_tau_ns")
+    tau2 = _num(report, "slow_tau_ns")
+    k = _num(report, "pileup_scale")
     assert abs(tau1 - exp["tau1"]) <= 0.03 * exp["tau1"], \
         "瘫痪型下 tau1 偏了：被测 %r，独立复算 %r" % (tau1, exp["tau1"])
     assert abs(tau2 - exp["tau2"]) <= 0.03 * exp["tau2"], \
@@ -523,9 +523,9 @@ def test_calibration_pins_pileup_coefficient():
     data = make_curve(pileup=3.5e-4, sigma=4.0, calibration=calib_counts, seed=2201)
     report, _ = run_case(data)
     exp = expect_with_calibration(data)
-    k = _num(report, "pileup_per_mega")
-    tau1 = _num(report, "tau1_ns")
-    tau2 = _num(report, "tau2_ns")
+    k = _num(report, "pileup_scale")
+    tau1 = _num(report, "fast_tau_ns")
+    tau2 = _num(report, "slow_tau_ns")
     assert abs(k - exp["pileup"] * 1e6) <= 0.02 * abs(exp["pileup"] * 1e6), \
         "标定没有把堆积系数定住：被测 %r，独立复算 %r" % (k, exp["pileup"] * 1e6)
     assert abs(k - 3.5e-4 * 1e6) <= 0.05 * 3.5e-4 * 1e6, \
@@ -579,16 +579,16 @@ def test_report_schema_and_rounding():
     report, ctx = run_case(data)
     for key in NEED:
         assert key in report, "报告缺少字段 %s" % key
-    for key in ("tau1_ns", "tau2_ns", "amplitude_ratio", "rmse_counts"):
+    for key in ("fast_tau_ns", "slow_tau_ns", "amplitude_ratio", "residual_rms"):
         v = _num(report, key)
         assert abs(v - round(v, 3)) <= 1e-12, "字段 %s 不是三位小数：%r" % (key, v)
-    for key in ("a1_counts", "a2_counts", "baseline_counts", "pileup_per_mega"):
+    for key in ("fast_amplitude", "slow_amplitude", "baseline", "pileup_scale"):
         v = _num(report, key)
         assert abs(v - round(v, 2)) <= 1e-12, "字段 %s 不是两位小数：%r" % (key, v)
-    n_used = int(_num(report, "n_used"))
+    n_used = int(_num(report, "samples_used"))
     assert int(_num(report, "dof")) == n_used - 6, \
         "dof 应等于 n_used - 6：n_used=%r dof=%r" % (n_used, report["dof"])
-    assert _num(report, "tau1_ns") < _num(report, "tau2_ns"), "tau1 必须小于 tau2"
+    assert _num(report, "fast_tau_ns") < _num(report, "slow_tau_ns"), "tau1 必须小于 tau2"
     raw = open(ctx["out"], encoding="utf-8").read()
     assert "NaN" not in raw and "Infinity" not in raw, "报告里出现了 NaN 或 Infinity"
 
@@ -656,18 +656,18 @@ def test_cache_reuse_and_append():
     assert entries[0].get("key") == key_a, "缓存 key 不是记录字节的 sha256：%r" % (entries[0].get("key"),)
     assert isinstance(entries[0].get("report"), dict), "缓存条目里的 report 不是对象"
 
-    entries[0]["report"]["tau1_ns"] = 999.0
+    entries[0]["report"]["fast_tau_ns"] = 999.0
     with open(cache, "w", encoding="utf-8") as f:
         json.dump(body, f, ensure_ascii=False)
     report_again, _ = run_case(data_a, cache_path=cache)
-    assert float(report_again.get("tau1_ns", 0.0)) == 999.0, \
-        "第二次跑同一份记录没有复用缓存：tau1_ns=%r" % (report_again.get("tau1_ns"),)
+    assert float(report_again.get("fast_tau_ns", 0.0)) == 999.0, \
+        "第二次跑同一份记录没有复用缓存：tau1_ns=%r" % (report_again.get("fast_tau_ns"),)
 
     data_b = make_curve(seed=1409)
     report_b, ctx_b = run_case(data_b, cache_path=cache)
     exp_b = expect(data_b)
-    assert abs(float(report_b["tau1_ns"]) - exp_b["tau1"]) <= 0.03 * exp_b["tau1"], \
-        "换记录后没有重新拟合：tau1_ns=%r，独立复算 %r" % (report_b["tau1_ns"], exp_b["tau1"])
+    assert abs(float(report_b["fast_tau_ns"]) - exp_b["tau1"]) <= 0.03 * exp_b["tau1"], \
+        "换记录后没有重新拟合：tau1_ns=%r，独立复算 %r" % (report_b["fast_tau_ns"], exp_b["tau1"])
     with open(cache, encoding="utf-8") as f:
         body2 = json.load(f)
     keys = [e.get("key") for e in body2.get("entries", [])]
@@ -689,8 +689,8 @@ def test_corrupt_cache_recovered():
     report, _ = run_case(data, cache_path=cache)
     exp = expect(data)
     assert isinstance(report, dict), "坏缓存把整次运行拖挂了（没有报告）"
-    assert abs(float(report["tau1_ns"]) - exp["tau1"]) <= 0.03 * exp["tau1"], \
-        "坏缓存下报告不对：tau1_ns=%r，独立复算 %r" % (report.get("tau1_ns"), exp["tau1"])
+    assert abs(float(report["fast_tau_ns"]) - exp["tau1"]) <= 0.03 * exp["tau1"], \
+        "坏缓存下报告不对：tau1_ns=%r，独立复算 %r" % (report.get("fast_tau_ns"), exp["tau1"])
     with open(cache, encoding="utf-8") as f:
         body = json.load(f)
     assert body.get("version") == 1, "坏缓存没有被重写成合法结构：%r" % (body,)
@@ -705,11 +705,11 @@ def test_cache_capped_at_32_entries():
     """
     import hashlib
     cache = os.path.join(tempfile.mkdtemp(prefix="dec-cache-cap-"), "cache.json")
-    stub = {"n_total": 241, "n_used": 236, "dof": 230, "tau1_ns": 3.499,
-            "tau2_ns": 17.964, "a1_counts": 12002.95, "a2_counts": 2103.81,
-            "baseline_counts": 11.77, "pileup_per_mega": 50.06,
-            "amplitude_ratio": 5.705, "rmse_counts": 3.095,
-            "meta": {"model": "biexp", "unit": {"time": "ns", "counts": "counts"}}}
+    stub = {"samples_total": 241, "samples_used": 236, "dof": 230, "fast_tau_ns": 3.499,
+            "slow_tau_ns": 17.964, "fast_amplitude": 12002.95, "slow_amplitude": 2103.81,
+            "baseline": 11.77, "pileup_scale": 50.06,
+            "amplitude_ratio": 5.705, "residual_rms": 3.095,
+            "method_note": {"model": "biexp", "unit": {"time": "ns", "counts": "counts"}}}
     old_keys = ["%064x" % (i + 1) for i in range(32)]
     with open(cache, "w", encoding="utf-8") as f:
         json.dump({"version": 1,
