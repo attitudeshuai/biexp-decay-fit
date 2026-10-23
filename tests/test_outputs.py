@@ -26,7 +26,7 @@ class _Lcg(object):
 
 def make_curve(a1=12000.0, tau1=3.5, a2=2100.0, tau2=18.0, base=12.0,
                dt_ns=0.5, duration_ns=120.0, sigma=3.0, saturation=6000.0,
-               pileup=5.0e-5, model="nonparalyzable", seed=101):
+               pileup=5.0e-5, model="nonparalyzable", calibration=None, seed=101):
     """造一条带堆积与限幅的双指数曲线。"""
     rng = _Lcg(seed)
     n = int(round(duration_ns / dt_ns)) + 1
@@ -39,11 +39,23 @@ def make_curve(a1=12000.0, tau1=3.5, a2=2100.0, tau2=18.0, base=12.0,
         if y > saturation:
             y = saturation
         samples.append({"t": t, "y": round(y, 3)})
-    return {"unit": {"time": "ns", "counts": "counts"},
-            "instrument": {"saturation_counts": saturation, "time_step_ns": dt_ns,
-                           "pileup_model": model},
-            "samples": samples,
-            "fit": {"saturation_margin": 0.5, "min_used": 40}}
+    out = {"unit": {"time": "ns", "counts": "counts"},
+           "instrument": {"saturation_counts": saturation, "time_step_ns": dt_ns,
+                          "pileup_model": model},
+           "samples": samples,
+           "fit": {"saturation_margin": 0.5, "min_used": 40}}
+    if calibration:
+        rng2 = _Lcg(seed + 7)
+        pts = []
+        for u_true in calibration:
+            if model == "nonparalyzable":
+                y_cal = u_true / (1.0 + pileup * u_true)
+            else:
+                y_cal = u_true * math.exp(-pileup * u_true)
+            noise = (rng2.next_u() + rng2.next_u() - 1.0) * math.sqrt(6.0) * 1.5
+            pts.append({"true_counts": round(u_true, 1), "observed": round(y_cal + noise, 3)})
+        out["calibration"] = pts
+    return out
 
 
 # ---------------------------------------------------------------- 独立复算
@@ -102,6 +114,18 @@ def _invert_one(y, k, model):
             break
     return u if math.isfinite(u) and u > 0 else None
 
+
+
+def _sse(ts, ys, t1, t2):
+    """给定两个时间常数，解三个线性系数并返回残差平方和。"""
+    coef = _fit_lin(ts, ys, t1, t2)
+    if coef is None:
+        return None, None
+    acc = 0.0
+    for t, y in zip(ts, ys):
+        m = coef[0] * math.exp(-t / t1) + coef[1] * math.exp(-t / t2) + coef[2]
+        acc += (y - m) ** 2
+    return acc, coef
 
 def _sse_params(ts, ys, p, model="nonparalyzable"):
     t1, t2, a1, a2, c, k = p
@@ -231,6 +255,71 @@ def expect(data):
 
 
 # ---------------------------------------------------------------- 驱动被测程序
+
+def _calib_sse(calib, k, model):
+    acc = 0.0
+    for c in calib:
+        u = float(c["true_counts"])
+        acc += (float(c["observed"]) - _forward(u, k, model)) ** 2
+    return acc
+
+
+def _golden1(fn, lo, hi, iters=90):
+    phi = (math.sqrt(5.0) - 1.0) / 2.0
+    a, b = lo, hi
+    c = b - phi * (b - a)
+    d = a + phi * (b - a)
+    fc, fd = fn(c), fn(d)
+    for _ in range(iters):
+        if fc <= fd:
+            b, d, fd = d, c, fc
+            c = b - phi * (b - a)
+            fc = fn(c)
+        else:
+            a, c, fc = c, d, fd
+            d = a + phi * (b - a)
+            fd = fn(d)
+    return (a + b) / 2.0
+
+
+def expect_with_calibration(data):
+    """有标定点时：先在标定点上定 k，再反解曲线，用（自己的）网格 + 细化拟合时间常数。"""
+    model = data["instrument"].get("pileup_model") or "nonparalyzable"
+    sat = float(data["instrument"]["saturation_counts"])
+    margin = float(data["fit"]["saturation_margin"])
+    ts, ys = [], []
+    for s in data["samples"]:
+        if float(s["y"]) >= sat - margin:
+            continue
+        ts.append(float(s["t"]))
+        ys.append(float(s["y"]))
+    calib = data["calibration"]
+    hi = 50.0 / max(float(c["true_counts"]) for c in calib)
+    k = _golden1(lambda x: _calib_sse(calib, x, model), 0.0, hi)
+    uy = [_invert_one(y, k, model) for y in ys]
+    if any(v is None for v in uy):
+        raise AssertionError("标定出的 k 无法反解曲线")
+    span = max(ts) - min(ts)
+    lo2, hi2 = span / 400.0, span / 4.0
+    best = None
+    for i in range(31):
+        t1 = lo2 * (hi2 / lo2) ** (i / 30.0)
+        for j in range(31):
+            t2 = t1 * 1.25 * (160.0 ** (j / 30.0))
+            if t2 <= t1:
+                continue
+            sse, coef = _sse(ts, uy, t1, t2)
+            if sse is not None and (best is None or sse < best[0]):
+                best = (sse, t1, t2)
+    t1, t2 = best[1], best[2]
+    for _ in range(6):
+        t1 = _golden1(lambda x: _sse(ts, uy, x, t2)[0], max(lo2, t1 / 1.5), min(t2 / 1.05, t1 * 1.5))
+        t2 = _golden1(lambda x: _sse(ts, uy, t1, x)[0], max(t1 * 1.05, t2 / 1.5), min(t1 * 160.0, t2 * 1.5))
+    sse, coef = _sse(ts, uy, t1, t2)
+    dof = len(ts) - 4
+    return {"tau1": t1, "tau2": t2, "a1": coef[0], "a2": coef[1], "base": coef[2],
+            "pileup": k, "rmse": math.sqrt(sse / dof), "n_used": len(ts), "dof": dof}
+
 def _run(path, out_path, cache_path=None, timeout=240):
     cmd = [sys.executable, ENTRY, "--data", path, "--out", out_path]
     if cache_path is not None:
@@ -422,6 +511,29 @@ def test_paralyzable_pileup_model():
         "瘫痪型下 tau2 偏了：被测 %r，独立复算 %r" % (tau2, exp["tau2"])
     assert abs(k - exp["pileup"] * 1e6) <= 0.12 * abs(exp["pileup"] * 1e6), \
         "瘫痪型下堆积系数偏了：被测 %r，独立复算 %r" % (k, exp["pileup"] * 1e6)
+
+
+def test_calibration_pins_pileup_coefficient():
+    """题面原文：「记录若带 calibration，堆积系数必须先在标定点上定出来」。
+
+    强堆积样品（k=3.5e-4，峰值处被压到三成）：只靠曲线本身，k 与两个时间常数会退化；
+    先用 5 个标定点定 k 再反解，报告的 k 与真值差不超过 5%、与独立复算不超过 2%。
+    """
+    calib_counts = [800.0, 2000.0, 4000.0, 8000.0, 14000.0]
+    data = make_curve(pileup=3.5e-4, sigma=4.0, calibration=calib_counts, seed=2201)
+    report, _ = run_case(data)
+    exp = expect_with_calibration(data)
+    k = _num(report, "pileup_per_mega")
+    tau1 = _num(report, "tau1_ns")
+    tau2 = _num(report, "tau2_ns")
+    assert abs(k - exp["pileup"] * 1e6) <= 0.02 * abs(exp["pileup"] * 1e6), \
+        "标定没有把堆积系数定住：被测 %r，独立复算 %r" % (k, exp["pileup"] * 1e6)
+    assert abs(k - 3.5e-4 * 1e6) <= 0.05 * 3.5e-4 * 1e6, \
+        "堆积系数离真值太远：被测 %r，真值 %r" % (k, 3.5e-4 * 1e6)
+    assert abs(tau1 - exp["tau1"]) <= 0.02 * exp["tau1"], \
+        "tau1 没对上：被测 %r，独立复算 %r" % (tau1, exp["tau1"])
+    assert abs(tau2 - exp["tau2"]) <= 0.02 * exp["tau2"], \
+        "tau2 没对上：被测 %r，独立复算 %r" % (tau2, exp["tau2"])
 
 
 def test_invalid_data_rejected_without_output():

@@ -9,21 +9,22 @@ reward.txt 由 tests/test.sh 在确认 pytest 结构化报告非空之后再落�
 import os
 
 WEIGHTS = {
-    "test_tau_pair_matches_independent_fit": 0.10,
-    "test_pileup_coefficient_recovered": 0.08,
-    "test_paralyzable_pileup_model": 0.09,
-    "test_near_degenerate_components_resolved": 0.08,
-    "test_saturated_points_removed": 0.07,
+    "test_tau_pair_matches_independent_fit": 0.08,
+    "test_pileup_coefficient_recovered": 0.06,
+    "test_paralyzable_pileup_model": 0.07,
+    "test_calibration_pins_pileup_coefficient": 0.12,
+    "test_near_degenerate_components_resolved": 0.07,
+    "test_saturated_points_removed": 0.06,
     "test_second_curve_with_other_rates": 0.06,
-    "test_rmse_near_noise_level": 0.05,
-    "test_baseline_and_ratio_consistent": 0.05,
+    "test_rmse_near_noise_level": 0.04,
+    "test_baseline_and_ratio_consistent": 0.04,
     "test_invalid_data_rejected_without_output": 0.07,
-    "test_report_schema_and_rounding": 0.06,
+    "test_report_schema_and_rounding": 0.05,
     "test_rerun_produces_identical_bytes": 0.05,
     "test_failed_run_keeps_previous_report": 0.04,
     "test_cache_reuse_and_append": 0.06,
     "test_cache_capped_at_32_entries": 0.06,
-    "test_corrupt_cache_recovered": 0.05,
+    "test_corrupt_cache_recovered": 0.04,
     "test_failed_run_leaves_cache_untouched": 0.03,
 }
 

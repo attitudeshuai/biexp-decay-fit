@@ -10,6 +10,8 @@
   · 读出电路有堆积，模型写在 instrument.pileup_model 里：非瘫痪型 y = u/(1 + k·u)，
     瘫痪型 y = u·exp(-k·u)（反解要牛顿迭代）；k 是堆积系数（每计数），
     记录里不给，要和曲线一起估出来；
+  · 记录若带 calibration（若干「真计数率 → 读数」标定点），堆积系数必须先在标定点上
+    定出来（一维黄金分割），再反解曲线拟合两个时间常数；没有标定点时才连 k 一起联合拟合；
   · 探测器上限写在 instrument.saturation_counts 里，读数落在上限附近（差不超过
     saturation_margin）的点是被限幅的，必须整点剔除、不参与拟合；
   · 给定 k 时把读数反解成 u = y/(1 - k·y)，此时 A1、A2、c 是线性最小二乘
@@ -64,6 +66,23 @@ def load_data(path):
     if model not in ("nonparalyzable", "paralyzable"):
         _fail("instrument.pileup_model 只认 nonparalyzable / paralyzable")
 
+    calib = []
+    raw_cal = raw.get("calibration")
+    if raw_cal is not None:
+        if not isinstance(raw_cal, list) or len(raw_cal) < 3:
+            _fail("calibration 要是至少 3 个标定点的列表")
+        for i, c in enumerate(raw_cal):
+            if not isinstance(c, dict):
+                _fail("calibration[%d] 不是对象" % i)
+            try:
+                u_true = float(c["true_counts"])
+                y_obs = float(c["observed"])
+            except (KeyError, TypeError, ValueError):
+                _fail("calibration[%d] 的 true_counts/observed 必须是数值" % i)
+            if not (math.isfinite(u_true) and math.isfinite(y_obs)) or u_true <= 0 or y_obs <= 0:
+                _fail("calibration[%d] 的取值必须为正的有限数" % i)
+            calib.append((u_true, y_obs))
+
     samples = raw.get("samples")
     if not isinstance(samples, list) or len(samples) < 100:
         _fail("samples 至少要 100 个采样点")
@@ -83,7 +102,8 @@ def load_data(path):
         times.append(t)
         ys.append(y)
     return {"times": times, "ys": ys, "sat": float(sat), "margin": float(margin),
-            "min_used": int(min_used), "unit": (raw.get("unit") or {}), "model": model}
+            "min_used": int(min_used), "unit": (raw.get("unit") or {}), "model": model,
+            "calibration": calib}
 
 
 def keep_unsaturated(ys, sat, margin):
@@ -296,6 +316,57 @@ def _golden(fn, lo, hi, iters=60):
 K_GRID = (0.0, 1.5e-5, 3.0e-5, 5.0e-5, 8.0e-5, 1.3e-4, 2.0e-4)
 
 
+
+def _calib_sse(calib, k, model):
+    acc = 0.0
+    for u_true, y_obs in calib:
+        m = _forward(u_true, k, model)
+        acc += (y_obs - m) ** 2
+    return acc
+
+
+def fit_k_from_calibration(calib, model):
+    """标定点上「真计数 → 读数」是一维关系，k 用黄金分割在 [0, 0.9/max(u)] 里搜。"""
+    if not calib:
+        return None
+    hi = 50.0 / max(u for u, _ in calib)
+    return _golden(lambda x: _calib_sse(calib, x, model), 0.0, hi)
+
+
+def fit_rates(ts, ys, model, k):
+    """k 已知时把读数反解回真计数，再按双指数拟合两个时间常数。"""
+    uy = _invert(ys, k, model)
+    if uy is None:
+        return None
+    span = max(ts) - min(ts)
+    t1_lo, t1_hi = span / 500.0, span / 5.0
+    best = None
+    for i in range(41):
+        tau1 = t1_lo * (t1_hi / t1_lo) ** (i / 40.0)
+        for j in range(41):
+            tau2 = tau1 * 1.2 * (200.0 ** (j / 40.0))
+            if tau2 <= tau1:
+                continue
+            sse, coef = _sse(ts, uy, tau1, tau2)
+            if sse is not None and (best is None or sse < best[0]):
+                best = (sse, tau1, tau2, coef)
+    if best is None:
+        return None
+    _, tau1, tau2, coef = best
+    t1_lo2 = max(t1_lo, span / 500.0)
+    for _ in range(8):
+        tau1 = _golden(lambda x: _sse(ts, uy, x, tau2)[0],
+                       max(t1_lo2, tau1 / 1.6), min(tau2 / 1.05, tau1 * 1.6))
+        tau2 = _golden(lambda x: _sse(ts, uy, tau1, x)[0],
+                       max(tau1 * 1.05, tau2 / 1.6), min(tau1 * 200.0, tau2 * 1.6))
+    sse, coef = _sse(ts, uy, tau1, tau2)
+    if coef is None:
+        return None
+    if tau1 >= tau2:
+        tau1, tau2, coef[0], coef[1] = tau2, tau1, coef[1], coef[0]
+    return {"tau1": tau1, "tau2": tau2, "a1": coef[0], "a2": coef[1],
+            "base": coef[2], "pileup": k, "sse": sse}
+
 def fit_biexp(ts, ys, model="nonparalyzable"):
     t_min = min(ts)
     t_max = max(ts)
@@ -355,7 +426,13 @@ def analyse(scan):
         _fail("剔除饱和点后只剩 %d 个有效点，少于要求的 %d" % (len(idx), scan["min_used"]))
     ts = [scan["times"][i] for i in idx]
     ys = [scan["ys"][i] for i in idx]
-    fit = fit_biexp(ts, ys, scan["model"])
+    fit = None
+    if scan["calibration"]:
+        k_cal = fit_k_from_calibration(scan["calibration"], scan["model"])
+        if k_cal is not None:
+            fit = fit_rates(ts, ys, scan["model"], k_cal)
+    if fit is None:
+        fit = fit_biexp(ts, ys, scan["model"])
     if fit is None:
         _fail("拟合失败，数据不足以定出参数")
     dof = len(ts) - 6
